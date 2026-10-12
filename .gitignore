@@ -1,0 +1,4 @@
+node_modules/
+state/
+logs/
+config.local.json

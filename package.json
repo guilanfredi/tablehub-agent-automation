@@ -1,0 +1,20 @@
+{
+  "name": "tablehub-agent-automation",
+  "private": true,
+  "type": "module",
+  "description": "Despachante contínuo e monitor dos agentes do Claude Code (projetos com .agents/config.json).",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "vitest run",
+    "despachante": "node src/dispatcher/index.mjs",
+    "despachante:teste": "node src/dispatcher/index.mjs --dry-run",
+    "agentes": "node src/monitor/agentes.mjs",
+    "monitor:instalar": "node src/monitor/install.mjs",
+    "monitor:remover": "node src/monitor/install.mjs --remover",
+    "agendador:instalar": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-scheduler.ps1",
+    "agendador:remover": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/uninstall-scheduler.ps1"
+  },
+  "devDependencies": {
+    "vitest": "3.2.7"
+  }
+}
