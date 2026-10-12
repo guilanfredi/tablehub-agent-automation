@@ -6,7 +6,8 @@ Automação local do time de agentes do Claude Code, separada dos projetos que e
   espera uma função (etiqueta de fase), roda `claude -p "/<função> <n>"` num worktree dedicado, com até 3 execuções
   em paralelo e portas próprias para cada uma. Parado, não gasta cota da assinatura.
 - **Monitor** (`src/monitor/`): dashboard de terminal, no estilo `pm2 monit`, com todas as sessões do Claude Code da
-  máquina (app desktop, terminal e despachante), alimentado por hooks.
+  máquina (app desktop, terminal e despachante), alimentado por hooks, e o consumo dos limites da assinatura.
+- **Relatório** (`src/report/`): execuções dos agentes num dia, com tokens, tempo, turnos, custo equivalente e falhas.
 
 Hoje atende o [TableHub](https://github.com/guilanfredi/tablehub), mas qualquer projeto com um `.agents/config.json` pode ser incluído.
 
@@ -78,14 +79,44 @@ As variáveis `CLAUDE_AGENT_TASK` e `CLAUDE_AGENT_PROJECT` identificam a execuç
 npm run despachante          # em primeiro plano, com o log no terminal (Ctrl+C para parar)
 npm run despachante:teste    # o que seria executado agora (--only <função>, --max <n>)
 npm run agentes              # dashboard (--texto, --json, --todas para scripts)
+npm run relatorio            # relatório de hoje (--ontem, --data AAAA-MM-DD, --markdown, --json)
 npm run agendador:instalar   # ou agendador:remover
 npm run monitor:instalar     # ou monitor:remover
 npm test
 ```
 
+## Limites da assinatura
+O dashboard (`npm run agentes`) mostra numa faixa abaixo do cabeçalho o uso da **sessão de 5 h**, do **semanal** e o
+**uso extra** do mês, com data, hora e contagem regressiva até o reset. Ele atualiza a cada 60 s; o `--texto`, o `--json`
+e o relatório também trazem esses dados.
+- Fonte: o mesmo endpoint que o `/usage` do Claude Code consulta (`api.anthropic.com/api/oauth/usage`), com o token OAuth de
+  `~/.claude/.credentials.json`. **É interno e não documentado**: se mudar ou falhar, aparece "limites indisponíveis" e o resto funciona.
+- O token **nunca é renovado** aqui (isso derrubaria o login do Claude Code), não é gravado e só vai para `api.anthropic.com`.
+  Login vencido → abra o Claude Code, que renova sozinho.
+- O semanal na faixa vermelha (≥ 90%) é o sinal para diminuir o `maxTotal`.
+
+## Relatório
+`npm run relatorio` mostra as execuções de um dia (hoje, por padrão):
+- **limites atuais**;
+- **resumo**: execuções por resultado, tempo total e médio, turnos, tokens (entrada, gravação/leitura de cache, saída,
+  raciocínio) e custo **equivalente na API** (na assinatura não é cobrado; serve para comparar funções e dias);
+- tabelas **por função** e **por projeto**;
+- **lista de execuções**, com o resumo da resposta de cada agente, e as **falhas**.
+
+| Opção | O que faz |
+|---|---|
+| `--ontem` / `--data AAAA-MM-DD` | outro dia |
+| `--markdown` | Markdown com links para as issues/PRs |
+| `--json` | dados brutos, para scripts ou uma tarefa agendada |
+
+Resultados: `ok`, `sem-avanço` (terminou sem mudar a fase), `erro`, `timeout`, `saída-inesperada`, `falha-ao-iniciar`
+e `em-andamento`. Fontes: `state/runs.jsonl` (gravado pelo despachante ao fim de cada execução), os JSON de
+`logs/<projeto>/` e os logs do despachante antigo em `<projeto>/automation/logs/`.
+
 ## Logs e estado
 - `logs/dispatcher.log`: uma linha por decisão. `logs/<projeto>/<data>-<função>-<n>.json`: saída completa de cada execução.
-- `state/jobs.json`: execuções em andamento. `state/history.json`: tentativas sem avanço. `state/paused-until.txt`: pausa.
+- `state/jobs.json`: execuções em andamento. `state/runs.jsonl`: execuções terminadas (uma linha cada).
+  `state/history.json`: tentativas sem avanço. `state/paused-until.txt`: pausa.
 - Monitor: `~/.claude/monitor/sessions/`, um JSON por sessão.
 
 ## Segurança

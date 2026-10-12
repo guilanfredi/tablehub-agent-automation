@@ -9,6 +9,7 @@
  *   └───────────────┘└────────────────────────────────────────────┘
  */
 import { totalmem } from 'node:os';
+import { fetchUsage, formatMoney, formatReset, level } from '../usage.mjs';
 import { loadSessions, untrackedProcesses, origin, readTranscript, sampleProcesses, treeTotals } from './data.mjs';
 
 // ---------------- texto e cores ----------------
@@ -143,12 +144,35 @@ function itemName(it, transcript) {
 
 // ---------------- estado do dashboard ----------------
 
+/** Faixa com os limites da assinatura: "Sessão (5 h) ███░ 15% renova hoje 20:00 (em 4h54) │ …" (testada). */
+export function limitsLine(result, now = Date.now(), width = Infinity) {
+  if (!result) return c.gray(' Limites da assinatura: consultando…');
+  if (!result.usage) return c.gray(` Limites da assinatura: ${result.error}`);
+  const color = { alto: c.red, medio: c.yellow, baixo: c.green };
+  const build = (compact) => {
+    const parts = result.usage.limits.map((l) => {
+      const paint = color[level(l)];
+      const pct = paint(`${Math.round(l.percent)}%`);
+      return compact
+        ? `${c.bold(l.label)} ${pct} ${c.gray(`→ ${formatReset(l.resetsAt, now)}`)}`
+        : `${c.bold(l.label)} ${bar(l.percent / 100, 8, paint)} ${pct} ${c.gray(`renova ${formatReset(l.resetsAt, now)}`)}`;
+    });
+    const x = result.usage.extra;
+    if (x) parts.push(`${c.bold('Extra')} ${formatMoney(x.used, x.currency)}${x.limit != null ? c.gray(` / ${formatMoney(x.limit, x.currency)}`) : ''}`);
+    return ` ${parts.join(c.gray(compact ? ' │ ' : '  │  '))}`;
+  };
+  // sem barras quando a linha completa não cabe no terminal
+  const full = build(false);
+  return visibleWidth(full) <= width ? full : build(true);
+}
+
 const HISTORY = 120;
+const USAGE_EVERY_MS = 60_000;
 
 export function startDashboard() {
   const out = process.stdout;
   const stdin = process.stdin;
-  const ui = { selectedId: null, showAll: false, logScroll: 0, sessions: [], items: [], sample: null, prevSample: null, metrics: new Map(), sampling: false };
+  const ui = { selectedId: null, showAll: false, logScroll: 0, sessions: [], items: [], sample: null, prevSample: null, metrics: new Map(), sampling: false, usage: null };
 
   function refreshSessions() {
     ui.sessions = loadSessions();
@@ -182,6 +206,11 @@ export function startDashboard() {
       m.procCount = now.count;
       ui.metrics.set(it.id, m);
     }
+    render();
+  }
+
+  async function refreshUsage() {
+    ui.usage = await fetchUsage();
     render();
   }
 
@@ -280,7 +309,7 @@ export function startDashboard() {
     const it = selected();
     const tr = it ? transcripts.get(it.id) : null;
 
-    const bodyH = rows - 2;
+    const bodyH = rows - 3; // cabeçalho, limites e rodapé
     const bottomH = Math.min(11, Math.max(9, Math.floor(bodyH * 0.35)));
     const topH = bodyH - bottomH;
     const leftW = Math.max(28, Math.min(46, Math.floor(cols * 0.3)));
@@ -292,7 +321,7 @@ export function startDashboard() {
     const active = ui.sessions.filter((s) => s.active).length;
     const working = ui.sessions.filter((s) => s.active && ['pensando', 'executando'].includes(s.state)).length;
     const waiting = ui.sessions.filter((s) => s.active && s.state === 'aguardando').length;
-    const headerText = ` TableHub · Monitor do Claude Code   ${active} ativa(s) · ${working} trabalhando · ${waiting} aguardando você`;
+    const headerText = ` Monitor do Claude Code   ${active} ativa(s) · ${working} trabalhando · ${waiting} aguardando você`;
     const time = `${new Date(now).toLocaleTimeString('pt-BR', { hour12: false })} `;
     const header = c.inverse(fit(headerText, cols - visibleWidth(time)) + time);
 
@@ -307,7 +336,7 @@ export function startDashboard() {
       panel(metricW, bottomH, 'Métricas', metricLines(it, tr, metricW - 2, now), false),
     ];
     const keys = ` ${c.bold('↑↓')} sessão  ${c.bold('PgUp/PgDn')} rolar atividade  ${c.bold('End')} acompanhar  ${c.bold('t')} ${ui.showAll ? 'só ativas' : 'incluir encerradas'}  ${c.bold('q')} sair`;
-    const lines = [header];
+    const lines = [header, fit(limitsLine(ui.usage, now, cols), cols)];
     for (let i = 0; i < topH; i++) lines.push(top[0][i] + top[1][i]);
     for (let i = 0; i < bottomH; i++) lines.push(bottom[0][i] + bottom[1][i]);
     lines.push(fit(c.gray(keys), cols - 1));
@@ -355,7 +384,9 @@ export function startDashboard() {
   refreshSessions();
   render();
   refreshProcesses().then(() => { refreshSessions(); refreshProcesses(); });
+  refreshUsage();
   timers = [
+    setInterval(refreshUsage, USAGE_EVERY_MS),
     setInterval(() => { refreshSessions(); render(); }, 1000),
     setInterval(refreshProcesses, 2000),
   ];
