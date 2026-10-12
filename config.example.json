@@ -1,0 +1,7 @@
+{
+  "maxTotal": 3,
+  "pollSeconds": 15,
+  "projects": [
+    "D:/dev/TableHub"
+  ]
+}
