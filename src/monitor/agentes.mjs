@@ -8,6 +8,7 @@
  *   npm run agentes -- --json       saída em JSON (para scripts)
  */
 import { win32 } from 'node:path';
+import { fetchUsage, formatMoney, formatReset } from '../usage.mjs';
 import { loadSessions, origin, sampleProcesses, untrackedProcesses } from './data.mjs';
 import { startDashboard } from './dashboard.mjs';
 
@@ -28,17 +29,25 @@ async function printOnce() {
   const now = Date.now();
   const sessions = loadSessions(now);
   const tracked = new Set(sessions.filter((s) => s.active).map((s) => s.claudePid));
-  const sample = await sampleProcesses();
+  const [sample, usage] = await Promise.all([sampleProcesses(), fetchUsage(now)]);
   const untracked = (sample ? untrackedProcesses(sample, tracked) : [])
     .map(({ pid, started, cmd }) => ({ pid, started, cmd }));
   const shown = ALL ? sessions : sessions.filter((s) => s.active);
 
   if (JSON_OUT) {
-    console.log(JSON.stringify({ sessions: shown, untracked }, null, 2));
+    console.log(JSON.stringify({ limits: usage.usage ?? null, limitsError: usage.error ?? null, sessions: shown, untracked }, null, 2));
     return;
   }
 
-  const lines = [`Claude Code — ${sessions.filter((s) => s.active).length} sessão(ões) ativa(s)`, ''];
+  const lines = [];
+  if (usage.usage) {
+    for (const l of usage.usage.limits) lines.push(`${l.label}: ${Math.round(l.percent)}% · renova ${formatReset(l.resetsAt, now)}`);
+    const x = usage.usage.extra;
+    if (x) lines.push(`Uso extra: ${formatMoney(x.used, x.currency)}${x.limit != null ? ` de ${formatMoney(x.limit, x.currency)}` : ''} no mês`);
+  } else {
+    lines.push(`Limites da assinatura: ${usage.error}`);
+  }
+  lines.push('', `Claude Code — ${sessions.filter((s) => s.active).length} sessão(ões) ativa(s)`, '');
   if (!shown.length) lines.push('Nenhuma sessão registrada pelo hook. Instalou? npm run monitor:instalar', '');
   for (const s of shown) {
     const name = s.agent ? `${s.project ? `${s.project} ` : ''}/${s.agent}` : win32.basename(s.cwd ?? '?');

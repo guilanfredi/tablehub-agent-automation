@@ -9,6 +9,7 @@
     "despachante": "node src/dispatcher/index.mjs",
     "despachante:teste": "node src/dispatcher/index.mjs --dry-run",
     "agentes": "node src/monitor/agentes.mjs",
+    "relatorio": "node src/report/index.mjs",
     "monitor:instalar": "node src/monitor/install.mjs",
     "monitor:remover": "node src/monitor/install.mjs --remover",
     "agendador:instalar": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-scheduler.ps1",

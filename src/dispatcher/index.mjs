@@ -42,6 +42,7 @@ const FILES = {
   jobs: join(STATE_DIR, 'jobs.json'),
   history: join(STATE_DIR, 'history.json'),
   pause: join(STATE_DIR, 'paused-until.txt'),
+  runs: join(STATE_DIR, 'runs.jsonl'),
 };
 const RETRY = { cooldownMin: RETRY_COOLDOWN_MIN, maxRuns: MAX_RUNS_WITHOUT_PROGRESS };
 
@@ -60,6 +61,21 @@ function readJson(file, fallback) {
 function writeJson(file, data) { writeFileSync(file, JSON.stringify(data, null, 2)); }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Carimbo AAAAMMDD-HHMMSS em hora local (nome dos logs; o relatório filtra o dia por ele). */
+function localStamp(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/** Uma linha por execução terminada, lida pelo relatório (npm run relatorio). */
+function recordOutcome(job, outcome) {
+  const line = {
+    project: job.project, role: job.role, number: job.number, title: job.title, isPr: job.isPr,
+    startedAt: new Date(job.startedAt).toISOString(), endedAt: new Date().toISOString(), outcome, logFile: job.logFile ?? null,
+  };
+  try { appendFileSync(FILES.runs, `${JSON.stringify(line)}\n`); } catch (e) { log(`AVISO: registrar execução: ${e.message}`); }
+}
 const kindOf = (isPr) => (isPr ? 'PR' : 'issue');
 
 async function safe(what, fn) {
@@ -226,7 +242,7 @@ async function startJob(p, role, item) {
     await gh.addLabel(item.number, cfg.labels.working);
     job.labeled = true;
 
-    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+    const stamp = localStamp();
     mkdirSync(join(LOG_DIR, cfg.id), { recursive: true });
     job.logFile = join(LOG_DIR, cfg.id, `${stamp}-${role.name}-${item.number}.json`);
     const promptFile = join(STATE_DIR, `prompt-${job.lane}.txt`);
@@ -261,6 +277,7 @@ async function startJob(p, role, item) {
     job.timer = setTimeout(() => timeoutJob(job), role.timeoutMin * 60_000);
   } catch (e) {
     log(`ERRO ao iniciar ${jobName(job)}: ${e.message}`);
+    recordOutcome(job, 'falha-ao-iniciar');
     if (job.labeled) await safe('remover etiqueta', () => gh.removeLabel(item.number, cfg.labels.working));
     history[cfg.id] = recordRun(history[cfg.id] ?? {}, item.number, role.name, false, Date.now(), RETRY).history;
     saveHistory();
@@ -295,12 +312,15 @@ async function finalize(job) {
     }
     if (!p) { log(`AVISO: ${name}: projeto não carregado; etiquetas não atualizadas.`); return; }
     const { cfg, gh } = p;
+    let outcome = 'ok';
     if (job.timedOut) {
+      outcome = 'timeout';
       await safe('comentar timeout', () => gh.comment(job.number, `**[Automação]** A função ${job.role} excedeu ${job.timeoutMin} min e foi interrompida. @${cfg.owner}, veja os logs locais.`));
       await safe('etiqueta aguardando', () => gh.addLabel(job.number, cfg.labels.waiting));
     } else {
       const result = readResult(job.logFile);
       if (result?.is_error) {
+        outcome = 'erro';
         const text = String(result.result ?? '');
         log(`ERRO: ${name}: ${text}`);
         const kind = classifyError(text);
@@ -311,6 +331,7 @@ async function finalize(job) {
       } else if (result) {
         log(`OK: ${name}: ${result.result}`);
       } else {
+        outcome = 'saída-inesperada';
         log(`Saída inesperada de ${name}; veja ${job.logFile ?? 'os logs'}`);
       }
     }
@@ -323,6 +344,7 @@ async function finalize(job) {
     const r = recordRun(history[cfg.id] ?? {}, job.number, job.role, progressed, Date.now(), RETRY);
     history[cfg.id] = r.history;
     saveHistory();
+    recordOutcome(job, outcome === 'ok' && !progressed ? 'sem-avanço' : outcome);
     if (r.escalate) {
       log(`${name}: ${MAX_RUNS_WITHOUT_PROGRESS} execuções seguidas sem avançar; chamando @${cfg.owner}.`);
       await safe('comentar', () => gh.comment(job.number, `**[Automação]** A função ${job.role} rodou ${MAX_RUNS_WITHOUT_PROGRESS} vezes seguidas sem avançar a fase. @${cfg.owner}, veja os logs locais e comente aqui para retomar.`));

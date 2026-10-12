@@ -63,3 +63,31 @@ describe('monitor: dados', () => {
     expect(treeTotals(procs, 10)).toEqual({ mem: 175, cpu: 9, count: 3 });
   });
 });
+
+describe('monitor: faixa de limites', () => {
+  const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  it('mostra percentual, reset e uso extra, ou o motivo da falta de dados', async () => {
+    const { limitsLine } = await import('./dashboard.mjs');
+    const now = new Date(2026, 9, 12, 15, 0).getTime();
+    const usage = {
+      limits: [{ id: 'session', label: 'Sessão (5 h)', percent: 100, resetsAt: new Date(2026, 9, 12, 20, 0).toISOString(), severity: 'critical' }],
+      extra: { used: 5.59, limit: 2000, currency: 'BRL' },
+    };
+    const line = strip(limitsLine({ usage }, now));
+    expect(line).toContain('Sessão (5 h) ████████ 100% renova hoje 20:00 (em 5h00)');
+    expect(line.replace(/\s/g, ' ')).toContain('Extra R$ 5,59 / R$ 2.000,00');
+    expect(strip(limitsLine({ error: 'login vencido' }, now))).toBe(' Limites da assinatura: login vencido');
+    expect(strip(limitsLine(null, now))).toContain('consultando');
+  });
+});
+
+describe('monitor: faixa de limites compacta', () => {
+  it('tira as barras quando a linha não cabe', async () => {
+    const { limitsLine } = await import('./dashboard.mjs');
+    const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const now = new Date(2026, 9, 12, 15, 0).getTime();
+    const usage = { limits: [{ id: 'session', label: 'Sessão (5 h)', percent: 18, resetsAt: new Date(2026, 9, 12, 20, 0).toISOString(), severity: 'normal' }], extra: null };
+    expect(strip(limitsLine({ usage }, now, 40))).toBe(' Sessão (5 h) 18% → hoje 20:00 (em 5h00)');
+    expect(strip(limitsLine({ usage }, now, 200))).toContain('█');
+  });
+});
