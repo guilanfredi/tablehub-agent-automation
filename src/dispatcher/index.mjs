@@ -21,8 +21,8 @@ import {
 } from './config.mjs';
 import { GitHub, findGh } from './github.mjs';
 import { findClaude, isAlive, killJobTree } from './proc.mjs';
-import { autoPrompt, lanePorts, normalizeProjectConfig, rolePermissionsFile } from './project.mjs';
-import { classifyError, freeSlot, interleave, madeProgress, pickJobs, recordRun } from './select.mjs';
+import { autoPrompt, lanePorts, modelArgs, normalizeProjectConfig, rolePermissionsFile, runSettingsFor } from './project.mjs';
+import { classifyError, freeSlot, interleave, madeProgress, pickJobs, recordRun, waitingForParentRun } from './select.mjs';
 
 // ---------------- argumentos e configuração ----------------
 const argv = process.argv.slice(2);
@@ -71,7 +71,8 @@ function localStamp(d = new Date()) {
 /** Uma linha por execução terminada, lida pelo relatório (npm run relatorio). */
 function recordOutcome(job, outcome) {
   const line = {
-    project: job.project, role: job.role, number: job.number, title: job.title, isPr: job.isPr,
+    project: job.project, role: job.role, number: job.number, title: job.title, isPr: job.isPr, task: job.task ?? job.number,
+    model: job.model ?? null, effort: job.effort ?? null,
     startedAt: new Date(job.startedAt).toISOString(), endedAt: new Date().toISOString(), outcome, logFile: job.logFile ?? null,
   };
   try { appendFileSync(FILES.runs, `${JSON.stringify(line)}\n`); } catch (e) { log(`AVISO: registrar execução: ${e.message}`); }
@@ -160,7 +161,7 @@ const rolesOf = (cfg) => (ONLY ? cfg.roles.filter((r) => r.name === ONLY) : cfg.
 let running = [];
 let history = readJson(FILES.history, {});
 
-const JOB_FIELDS = ['project', 'role', 'number', 'title', 'isPr', 'lane', 'slot', 'pid', 'startedAt', 'timeoutMin', 'logFile', 'labeled', 'status', 'legacy'];
+const JOB_FIELDS = ['project', 'role', 'number', 'title', 'isPr', 'task', 'model', 'effort', 'lane', 'slot', 'pid', 'startedAt', 'timeoutMin', 'logFile', 'labeled', 'status', 'legacy'];
 function saveJobs() {
   writeJson(FILES.jobs, running.map((j) => Object.fromEntries(JOB_FIELDS.filter((k) => j[k] !== undefined).map((k) => [k, j[k]]))));
 }
@@ -216,6 +217,22 @@ async function prepareWorktree(cfg, roleName, slot) {
 
 // ---------------- execuções ----------------
 const jobName = (j) => `${j.project}: /${j.role} ${j.number}`;
+const describeSettings = (s) => `modelo ${s.model ?? 'padrão'}, esforço ${s.effort ?? 'padrão'} (${s.reason})`;
+
+/**
+ * Modelo/esforço da execução e a tarefa a que ela pertence: usa as etiquetas do item e, num PR,
+ * as das issues que ele fecha (ex.: tipo:bug na issue); a tarefa de um PR é a issue que ele fecha.
+ */
+async function settingsForItem(p, role, item) {
+  let labels = item.labels;
+  let task = item.number;
+  if (item.isPr) {
+    const linked = (await safe(`issues ligadas ao #${item.number}`, () => p.gh.linkedIssues(item.number))) ?? [];
+    labels = [...labels, ...linked.flatMap((i) => i.labels)];
+    if (linked.length) task = linked[0].number;
+  }
+  return { settings: runSettingsFor(role, labels), task };
+}
 
 async function startJob(p, role, item) {
   const { cfg, gh } = p;
@@ -233,6 +250,11 @@ async function startJob(p, role, item) {
       log(`${cfg.id} #${item.number}: @${cfg.owner} respondeu; retomando.`);
       await gh.removeLabel(item.number, cfg.labels.waiting);
     }
+    const { settings, task } = await settingsForItem(p, role, item);
+    job.task = task;
+    job.model = settings.model;
+    job.effort = settings.effort;
+    log(`${jobName(job)}: ${describeSettings(settings)}.`);
     const wt = await prepareWorktree(cfg, role.name, job.slot);
     const permissions = rolePermissionsFile(wt, role.name);
     if (!existsSync(permissions)) throw new Error(`falta ${permissions} (permissões da função).`);
@@ -246,7 +268,7 @@ async function startJob(p, role, item) {
     mkdirSync(join(LOG_DIR, cfg.id), { recursive: true });
     job.logFile = join(LOG_DIR, cfg.id, `${stamp}-${role.name}-${item.number}.json`);
     const promptFile = join(STATE_DIR, `prompt-${job.lane}.txt`);
-    writeFileSync(promptFile, autoPrompt(cfg, ports, p.extraPrompt));
+    writeFileSync(promptFile, autoPrompt(cfg, p.extraPrompt));
     const out = openSync(job.logFile, 'w');
     const err = openSync(`${job.logFile}.err`, 'w');
     const child = spawn(claude, [
@@ -254,6 +276,7 @@ async function startJob(p, role, item) {
       '--settings', permissions,
       '--append-system-prompt-file', promptFile,
       ...cfg.addDirs.flatMap((d) => ['--add-dir', d]),
+      ...modelArgs(settings),
       '--output-format', 'json',
     ], {
       cwd: wt,
@@ -382,6 +405,7 @@ async function candidatesFor(p, items, freeSlots, runningJobs) {
   return pickJobs({
     items, running: mine, roles: rolesOf(p.cfg), maxTotal: mine.length + freeSlots, maxPerRole: p.cfg.maxPerRole,
     history: history[p.cfg.id] ?? {}, now: Date.now(), cfg: labelCfg(p.cfg), waitingResolved: await resolveWaiting(p, items),
+    blocked: waitingForParentRun(items, mine, p.cfg.bot.login),
   }).map((c) => ({ ...c, project: p }));
 }
 
@@ -483,7 +507,17 @@ async function dryRun() {
   if (until) console.log(`Pausado até ${new Date(until).toLocaleString('pt-BR')}.`);
   const picks = interleave(lists, free);
   if (!picks.length) console.log('Nada a executar agora.');
-  for (const c of picks) console.log(`Executaria: ${c.project.cfg.id}: /${c.role.name} ${c.item.number} (${kindOf(c.item.isPr)}: ${c.item.title})`);
+  for (const c of picks) {
+    const { settings } = await settingsForItem(c.project, c.role, c.item);
+    console.log(`Executaria: ${c.project.cfg.id}: /${c.role.name} ${c.item.number} (${kindOf(c.item.isPr)}: ${c.item.title}) — ${describeSettings(settings)}`);
+  }
+  // como cada função rodaria hoje, para conferir a configuração
+  for (const p of projects.values()) {
+    for (const r of p.cfg.roles) {
+      const variants = [{ labels: [], name: 'padrão' }, ...r.overrides.map((o) => ({ labels: o.labels, name: o.labels.join('/') }))];
+      for (const v of variants) console.log(`  ${p.cfg.id}: ${r.name} [${v.name}] → ${describeSettings(runSettingsFor(r, v.labels))}`);
+    }
+  }
 }
 
 async function main() {

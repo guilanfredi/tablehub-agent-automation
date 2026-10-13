@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyError, freeSlot, interleave, madeProgress, normalizeItem, pickJobs, recordRun } from './select.mjs';
+import { classifyError, closingRefs, freeSlot, interleave, madeProgress, normalizeItem, pickJobs, recordRun, waitingForParentRun } from './select.mjs';
 import { descendants } from './proc.mjs';
 
 const WORKING = 'agente:trabalhando';
@@ -91,7 +91,7 @@ describe('despachante: avanço e novas tentativas', () => {
 describe('despachante: utilidades', () => {
   it('normaliza itens da API', () => {
     expect(normalizeItem({ number: 3, title: 'x', pull_request: {}, user: { login: 'dono' }, labels: [{ name: 'fase:qa' }], updated_at: 'u' }))
-      .toEqual({ number: 3, title: 'x', isPr: true, author: 'dono', labels: ['fase:qa'], updatedAt: 'u' });
+      .toEqual({ number: 3, title: 'x', isPr: true, author: 'dono', labels: ['fase:qa'], updatedAt: 'u', closes: [] });
   });
 
   it('acha o menor número livre', () => {
@@ -113,5 +113,30 @@ describe('despachante: utilidades', () => {
       { pid: 30, ppid: 99, started: 120 },
     ];
     expect(descendants(table, 10, 90).sort()).toEqual([20, 21]);
+  });
+});
+
+describe('despachante: PR aberto no meio de outra execução', () => {
+  it('lê as referências de fechamento do corpo do PR', () => {
+    expect(closingRefs('Closes #22\n\nTambém fixes #3, resolves: #4 e cita #9')).toEqual([22, 3, 4]);
+    expect(closingRefs(null)).toEqual([]);
+    expect(normalizeItem({ number: 23, pull_request: {}, body: 'Closes #22', labels: [] }).closes).toEqual([22]);
+    expect(normalizeItem({ number: 22, body: 'Closes #1', labels: [] }).closes).toEqual([]); // issue não fecha nada
+  });
+
+  it('segura o PR do bot enquanto a issue que ele fecha ainda está em execução', () => {
+    const items = [
+      { number: 23, author: 'bot', closes: [22] },
+      { number: 30, author: 'bot', closes: [27] },
+      { number: 31, author: 'dono', closes: [22] },
+    ];
+    expect([...waitingForParentRun(items, [{ number: 22 }], 'bot')]).toEqual([23]);
+    expect([...waitingForParentRun(items, [], 'bot')]).toEqual([]);
+    const picks = pickJobs({
+      items: [item(23, ['fase:dev'], { author: 'bot', closes: [22] }), item(24, ['fase:dev'])],
+      running: [{ number: 22, role: 'dev' }], roles: ROLES, maxTotal: 3, waitingResolved: new Set(), history: {},
+      now: Date.now(), cfg, blocked: waitingForParentRun([{ number: 23, author: 'bot', closes: [22] }], [{ number: 22 }], 'bot'),
+    }).map((p) => p.item.number);
+    expect(picks).toEqual([24]);
   });
 });

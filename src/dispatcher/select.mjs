@@ -11,7 +11,27 @@ export function normalizeItem(it) {
     author: it.user?.login,
     labels: (it.labels ?? []).map((l) => (typeof l === 'string' ? l : l.name)),
     updatedAt: it.updated_at,
+    closes: closingRefs(it.pull_request ? it.body : ''),
   };
+}
+
+/** Números citados com palavra de fechamento ("Closes #22", "fixes #3") no corpo de um PR (testada). */
+export function closingRefs(body) {
+  const refs = new Set();
+  for (const m of String(body ?? '').matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)/gi)) refs.add(Number(m[1]));
+  return [...refs];
+}
+
+/**
+ * PRs do bot que fecham um item ainda em execução (função pura; testada).
+ *
+ * Um agente costuma abrir o PR no meio do trabalho, já com a etiqueta de fase, e só no fim troca a
+ * etiqueta (ex.: fase:dev → fase:qa) ou pede decisão do dono. Com vagas livres, o despachante pegaria
+ * esse PR antes da hora e abriria um segundo agente à toa. O PR espera a execução da issue terminar.
+ */
+export function waitingForParentRun(items, running, bot) {
+  const runningNumbers = new Set(running.map((j) => j.number));
+  return new Set(items.filter((it) => it.author === bot && it.closes?.some((n) => runningNumbers.has(n))).map((it) => it.number));
 }
 
 const historyKey = (number, role) => `${number}:${role}`;

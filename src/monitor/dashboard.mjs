@@ -9,7 +9,7 @@
  *   └───────────────┘└────────────────────────────────────────────┘
  */
 import { totalmem } from 'node:os';
-import { fetchUsage, formatMoney, formatReset, level } from '../usage.mjs';
+import { fetchUsage, formatMoney, formatReset, level, staleNote } from '../usage.mjs';
 import { loadSessions, untrackedProcesses, origin, readTranscript, sampleProcesses, treeTotals } from './data.mjs';
 
 // ---------------- texto e cores ----------------
@@ -159,7 +159,7 @@ export function limitsLine(result, now = Date.now(), width = Infinity) {
     });
     const x = result.usage.extra;
     if (x) parts.push(`${c.bold('Extra')} ${formatMoney(x.used, x.currency)}${x.limit != null ? c.gray(` / ${formatMoney(x.limit, x.currency)}`) : ''}`);
-    return ` ${parts.join(c.gray(compact ? ' │ ' : '  │  '))}`;
+    return ` ${parts.join(c.gray(compact ? ' │ ' : '  │  '))}${c.gray(staleNote(result))}`;
   };
   // sem barras quando a linha completa não cabe no terminal
   const full = build(false);

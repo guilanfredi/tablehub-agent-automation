@@ -43,10 +43,11 @@ mergeado; a cópia de trabalho não importa. O despachante relê a cada 10 min.
   "repo": "guilanfredi/tablehub",
   "owner": "guilanfredi",                   // quem aprova e responde dúvidas
   "bot": { "login": "gui-dev-bot", "email": "...@users.noreply.github.com" },
-  "labels": { "working": "agente:trabalhando", "waiting": "aguardando-dono" },
+  "labels": { "working": "agente:trabalhando", "waiting": "aguardando-dono", "done": "pronto-para-aprovação" },
   "roles": [                                // ordem = prioridade
-    { "name": "revisor", "label": "fase:review", "timeoutMin": 30, "prOnly": true },
-    { "name": "dev", "label": "fase:dev", "timeoutMin": 120 }
+    { "name": "revisor", "label": "fase:review", "timeoutMin": 30, "prOnly": true, "model": "claude-opus-5-5", "effort": "medium" },
+    { "name": "dev", "label": "fase:dev", "timeoutMin": 120, "model": "claude-opus-5-5",
+      "overrides": [{ "labels": ["tipo:bug"], "model": "claude-sonnet-5-5" }] }   // exceção por etiqueta
   ],
   "maxPerRole": { "revisor": 1 },           // opcional
   "worktreesDir": "../TableHub-agents",     // relativo ao projeto
@@ -58,12 +59,17 @@ mergeado; a cópia de trabalho não importa. O despachante relê a cada 10 min.
 - `.agents/roles/<função>.json`: permissões do Claude Code da função (passadas com `--settings`). É obrigatório.
 - `.agents/prompt.md`: instruções extras do projeto para o modo automático. É opcional.
 - O comando é `/<função> <número>`: o projeto precisa ter uma skill com o nome de cada função.
+- **Modelo e esforço** (`model`, `effort`: `low`…`max`) por função, passados com `--model`/`--effort`; sem eles, vale o padrão
+  do Claude Code. `overrides` troca modelo/esforço quando o item tem uma das etiquetas. Num PR, contam também as etiquetas
+  das issues que ele fecha (`Closes #N`). O `npm run despachante:teste` mostra como cada função rodaria.
+- `labels.done`: etiqueta de tarefa concluída (opcional); o relatório usa para o custo por tarefa concluída.
 
 ## Como funciona
 1. A cada consulta, junta as tarefas de todos os projetos. Em cada projeto, vale a ordem das funções e, dentro da mesma
    fase, vai primeiro o item parado há mais tempo. As vagas são divididas entre os projetos, um de cada por vez.
 2. Ignora tarefas com a etiqueta `working`, as que não foram criadas pelo dono ou pelo bot (repositórios públicos), e as com
-   `waiting` até o dono comentar.
+   `waiting` até o dono comentar. Um PR do bot que fecha uma issue ainda em execução espera ela terminar: o agente abre o
+   PR no meio do trabalho, já com etiqueta de fase, e só no fim troca a etiqueta.
 3. Cada execução tem um worktree `<worktreesDir>/<função>-<n>` (limpo, na branch principal; `setup` quando o arquivo
    observado muda) e uma faixa de portas própria. As faixas são globais, então dois projetos nunca colidem.
 4. Marca a etiqueta `working`, roda a função com tempo máximo e, ao terminar, encerra processos que sobraram e
@@ -87,8 +93,10 @@ npm test
 
 ## Limites da assinatura
 O dashboard (`npm run agentes`) mostra numa faixa abaixo do cabeçalho o uso da **sessão de 5 h**, do **semanal** e o
-**uso extra** do mês, com data, hora e contagem regressiva até o reset. Ele atualiza a cada 60 s; o `--texto`, o `--json`
-e o relatório também trazem esses dados.
+**uso extra** do mês, com data, hora e contagem regressiva até o reset. O `--texto`, o `--json` e o relatório também trazem
+esses dados.
+- O endpoint responde 429 a consultas frequentes: dashboard e relatório compartilham um cache (`state/usage-cache.json`)
+  e consultam no máximo a cada 5 min. Se a consulta falhar, mostram o último valor com o horário ("dados de 14:05").
 - Fonte: o mesmo endpoint que o `/usage` do Claude Code consulta (`api.anthropic.com/api/oauth/usage`), com o token OAuth de
   `~/.claude/.credentials.json`. **É interno e não documentado**: se mudar ou falhar, aparece "limites indisponíveis" e o resto funciona.
 - O token **nunca é renovado** aqui (isso derrubaria o login do Claude Code), não é gravado e só vai para `api.anthropic.com`.
@@ -98,16 +106,22 @@ e o relatório também trazem esses dados.
 ## Relatório
 `npm run relatorio` mostra as execuções de um dia (hoje, por padrão):
 - **limites atuais**;
-- **resumo**: execuções por resultado, tempo total e médio, turnos, tokens (entrada, gravação/leitura de cache, saída,
-  raciocínio) e custo **equivalente na API** (na assinatura não é cobrado; serve para comparar funções e dias);
-- tabelas **por função** e **por projeto**;
-- **lista de execuções**, com o resumo da resposta de cada agente, e as **falhas**.
+- **resumo**: execuções por resultado, tarefas (concluídas e **custo médio por tarefa concluída**), tempo total e médio
+  (de relógio), turnos, tokens (entrada, gravação/leitura de cache, saída, raciocínio) e custo **equivalente na API**
+  (na assinatura não é cobrado; serve para comparar funções, modelos e dias);
+- tabelas **por função**, **por modelo**, **por projeto** e **por tarefa** (issue + PRs que a fecham, com a sequência de
+  funções e o estado, consultado no GitHub);
+- **lista de execuções**, com o modelo/esforço e o resumo da resposta de cada agente, e as **falhas**.
+
+Tokens e custo vêm do total da sessão (`modelUsage`). Quando o agente usa tarefas em segundo plano, o JSON do `claude -p`
+descreve só o último resultado em `usage`/`num_turns`; nesses casos os turnos aparecem como "—".
 
 | Opção | O que faz |
 |---|---|
 | `--ontem` / `--data AAAA-MM-DD` | outro dia |
 | `--markdown` | Markdown com links para as issues/PRs |
 | `--json` | dados brutos, para scripts ou uma tarefa agendada |
+| `--sem-github` | não consulta o GitHub (sem juntar issue e PR nem estado das tarefas) |
 
 Resultados: `ok`, `sem-avanço` (terminou sem mudar a fase), `erro`, `timeout`, `saída-inesperada`, `falha-ao-iniciar`
 e `em-andamento`. Fontes: `state/runs.jsonl` (gravado pelo despachante ao fim de cada execução), os JSON de

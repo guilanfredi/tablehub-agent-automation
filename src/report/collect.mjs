@@ -34,22 +34,39 @@ function readJsonFile(path) {
   } catch { return { invalid: true }; }
 }
 
-/** Métricas do JSON de saída do `claude -p --output-format json` (função pura; testada). */
+/**
+ * Métricas do JSON de saída do `claude -p --output-format json` (função pura; testada).
+ *
+ * Quando o agente usa tarefas em segundo plano, a sessão produz vários resultados e `usage`,
+ * `duration_ms` e `num_turns` descrevem só o último (`result_index` > 0). `modelUsage` e
+ * `total_cost_usd` são da sessão inteira: os tokens vêm de lá; os turnos ficam desconhecidos.
+ */
 export function metricsFrom(result) {
   const u = result?.usage ?? {};
-  return {
-    durationMs: result?.duration_ms ?? null,
-    apiMs: result?.duration_api_ms ?? null,
-    turns: result?.num_turns ?? null,
-    costUsd: result?.total_cost_usd ?? null,
-    tokens: {
+  const perModel = Object.entries(result?.modelUsage ?? {});
+  const partial = (result?.result_index ?? 0) > 0;
+  const tokens = perModel.length
+    ? perModel.reduce((t, [, m]) => ({
+      input: t.input + (m.inputTokens ?? 0),
+      cacheWrite: t.cacheWrite + (m.cacheCreationInputTokens ?? 0),
+      cacheRead: t.cacheRead + (m.cacheReadInputTokens ?? 0),
+      output: t.output + (m.outputTokens ?? 0),
+      thinking: t.thinking + (m.thinkingTokens ?? 0),
+    }), { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, thinking: 0 })
+    : {
       input: u.input_tokens ?? 0,
       cacheWrite: u.cache_creation_input_tokens ?? 0,
       cacheRead: u.cache_read_input_tokens ?? 0,
       output: u.output_tokens ?? 0,
       thinking: u.output_tokens_details?.thinking_tokens ?? 0,
-    },
-    models: Object.keys(result?.modelUsage ?? {}),
+    };
+  return {
+    durationMs: partial ? null : result?.duration_ms ?? null,
+    apiMs: partial ? null : result?.duration_api_ms ?? null,
+    turns: partial ? null : result?.num_turns ?? null,
+    costUsd: result?.total_cost_usd ?? null,
+    tokens,
+    models: perModel.map(([name]) => name),
     denials: result?.permission_denials?.length ?? 0,
     summary: typeof result?.result === 'string' ? result.result.replace(/\s+/g, ' ').trim() : '',
   };
@@ -80,7 +97,8 @@ export function loadRuns({ day, stateDir, logDir, projectPaths = [] }) {
   const runningLogs = new Set(
     [join(stateDir, 'jobs.json'), ...projectPaths.map((p) => join(p, 'automation', 'state', 'jobs.json'))]
       .flatMap((f) => { try { return JSON.parse(readFileSync(f, 'utf8')); } catch { return []; } })
-      .filter((j) => j.logFile).map((j) => keyOf(j.logFile)),
+      // pelo nome do arquivo (carimbo-função-número): vale mesmo se a pasta da automação mudar de lugar
+      .filter((j) => j.logFile).map((j) => basename(j.logFile.replaceAll('\\', '/')).toLowerCase()),
   );
   const legacyRunning = projectPaths
     .map((p) => { try { return { project: basename(p).toLowerCase(), ...JSON.parse(readFileSync(join(p, 'automation', 'state', 'running.json'), 'utf8')) }; } catch { return null; } })
@@ -106,28 +124,37 @@ export function loadRuns({ day, stateDir, logDir, projectPaths = [] }) {
     const read = readJsonFile(file);
     let outcome = entry?.outcome;
     if (!outcome) {
-      const stillRunning = runningLogs.has(key) || legacyRunning.some((l) => l.project === project && l.role === meta.role && l.number === meta.number);
+      const stillRunning = runningLogs.has(basename(file).toLowerCase()) || legacyRunning.some((l) => l.project === project && l.role === meta.role && l.number === meta.number);
       if (read.json) outcome = read.json.is_error ? 'erro' : 'ok';
       else outcome = stillRunning ? 'em-andamento' : 'saída-inesperada';
     }
+    const metrics = metricsFrom(read.json);
+    const startedAt = entry?.startedAt ?? meta.startedAt;
+    // tempo de relógio: do registro; sem ele, até a última gravação do log (feita ao fim da execução)
+    let endedAt = entry?.endedAt ?? null;
+    if (!endedAt && read.json) { try { endedAt = statSync(file).mtime.toISOString(); } catch { /* sem data */ } }
     runs.push({
       project: entry?.project ?? project,
       role: meta.role,
       number: meta.number,
+      task: entry?.task ?? meta.number,
       title: entry?.title ?? null,
       isPr: entry?.isPr ?? null,
-      startedAt: entry?.startedAt ?? meta.startedAt,
-      endedAt: entry?.endedAt ?? null,
+      requestedModel: entry?.model ?? null,
+      effort: entry?.effort ?? null,
+      startedAt,
+      endedAt,
       outcome,
       source,
       logFile: file,
-      ...metricsFrom(read.json),
+      ...metrics,
+      durationMs: endedAt ? Date.parse(endedAt) - Date.parse(startedAt) : metrics.durationMs,
     });
   }
   // execuções que falharam antes de criar o log
   for (const e of noLog) {
     if (localDay(e.startedAt) !== day) continue;
-    runs.push({ ...e, source: 'despachante', ...metricsFrom(null) });
+    runs.push({ ...e, task: e.task ?? e.number, requestedModel: e.model ?? null, source: 'despachante', ...metricsFrom(null) });
   }
   return runs.sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
 }
@@ -146,19 +173,52 @@ function addTotals(acc, r) {
 
 const emptyTotals = () => ({ runs: 0, durationMs: 0, turns: 0, costUsd: 0, tokens: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, thinking: 0 }, outcomes: {} });
 
-/** Totais do dia, por função e por projeto, e a lista de falhas (função pura; testada). */
+/**
+ * Junta issue e PR na mesma tarefa: a execução num PR passa a contar para a issue que ele fecha
+ * (`items`: "projeto#n" → { linked: [issues] }, vindo do GitHub) (função pura; testada).
+ */
+export function linkTasks(runs, items) {
+  return runs.map((r) => {
+    const linked = items.get(`${r.project}#${r.number}`)?.linked?.[0];
+    return linked && (r.task == null || r.task === r.number) ? { ...r, task: linked } : r;
+  });
+}
+
+/** "concluída" se algum item da tarefa fechou ou tem a etiqueta de pronto; null sem informação (testada). */
+export function taskStatus(task, items, doneLabel) {
+  const known = [task.task, ...task.items].map((n) => items.get(`${task.project}#${n}`)).filter(Boolean);
+  if (!known.length) return null;
+  return known.some((i) => i.state === 'closed' || (doneLabel && i.labels.includes(doneLabel))) ? 'concluída' : 'em andamento';
+}
+
+/** "claude-sonnet-5-5" → "sonnet"; execução com mais de um modelo vira "opus+haiku" (testada). */
+export function modelLabel(run) {
+  const short = (id) => /claude-([a-z]+)/.exec(id)?.[1] ?? id;
+  const names = run.models?.length ? run.models : run.requestedModel ? [run.requestedModel] : [];
+  return names.length ? [...new Set(names.map(short))].join('+') : '—';
+}
+
+/** Totais do dia, por função, projeto, modelo e tarefa (issue + PRs que a fecham), e as falhas (função pura; testada). */
 export function summarize(runs) {
   const totals = emptyTotals();
   const byRole = {};
   const byProject = {};
+  const byModel = {};
+  const byTask = {};
   for (const r of runs) {
     addTotals(totals, r);
     addTotals(byRole[r.role] ??= emptyTotals(), r);
     addTotals(byProject[r.project] ??= emptyTotals(), r);
+    addTotals(byModel[modelLabel(r)] ??= emptyTotals(), r);
+    const t = byTask[`${r.project}#${r.task ?? r.number}`] ??= { ...emptyTotals(), project: r.project, task: r.task ?? r.number, title: null, items: [], roles: [], status: null };
+    addTotals(t, r);
+    t.title ??= r.title;
+    if (!t.items.includes(r.number)) t.items.push(r.number);
+    t.roles.push(r.role);
   }
   const finished = runs.filter((r) => r.durationMs != null).length;
   totals.avgDurationMs = finished ? Math.round(totals.durationMs / finished) : 0;
   totals.tokens.total = totals.tokens.input + totals.tokens.cacheWrite + totals.tokens.cacheRead + totals.tokens.output;
   totals.failures = runs.filter((r) => FAILURES.has(r.outcome)).length;
-  return { totals, byRole, byProject, failures: runs.filter((r) => FAILURES.has(r.outcome)) };
+  return { totals, byRole, byProject, byModel, byTask, failures: runs.filter((r) => FAILURES.has(r.outcome)) };
 }

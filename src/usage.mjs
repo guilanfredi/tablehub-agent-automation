@@ -6,11 +6,16 @@
  * o refresh troca o refresh token e derrubaria o login do Claude Code. Ele só é enviado para api.anthropic.com
  * e nunca é gravado nem registrado em log.
  */
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { STATE_DIR } from './dispatcher/config.mjs';
 
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+/** Cache compartilhado (dashboard, relatório): o endpoint responde 429 a consultas frequentes. */
+const CACHE_FILE = join(STATE_DIR, 'usage-cache.json');
+const CACHE_MAX_AGE_MS = 5 * 60_000;
+const CACHE_STALE_LIMIT_MS = 24 * 3600_000;
 
 export function credentialsFile() {
   if (process.env.CLAUDE_CREDENTIALS_FILE) return process.env.CLAUDE_CREDENTIALS_FILE;
@@ -26,9 +31,8 @@ export function readOAuthToken(now = Date.now()) {
   return { token: oauth.accessToken, plan: oauth.subscriptionType ?? null };
 }
 
-/** Consulta os limites. Retorna { usage } ou { error } (nunca lança). */
-export async function fetchUsage(now = Date.now()) {
-  const { token, plan, error } = readOAuthToken(now);
+async function requestUsage(now) {
+  const { token, error } = readOAuthToken(now);
   if (!token) return { error };
   try {
     const res = await fetch(USAGE_URL, {
@@ -36,11 +40,37 @@ export async function fetchUsage(now = Date.now()) {
       signal: AbortSignal.timeout(10_000),
     });
     if (res.status === 401) return { error: 'login recusado: abra o Claude Code para renovar' };
-    if (!res.ok) return { error: `limites indisponíveis (HTTP ${res.status})` };
-    return { usage: parseUsage(await res.json()), plan };
+    if (!res.ok) return { error: `HTTP ${res.status}${res.status === 429 ? ', consultas demais' : ''}` };
+    return { usage: parseUsage(await res.json()) };
   } catch (e) {
-    return { error: `limites indisponíveis (${e.name === 'TimeoutError' ? 'sem resposta' : e.message})` };
+    return { error: e.name === 'TimeoutError' ? 'sem resposta' : e.message };
   }
+}
+
+/**
+ * Limites atuais: { usage, fetchedAt } ou { error } (nunca lança). Usa o cache de até 5 min; se a consulta
+ * falhar, devolve o último valor (de até 24 h) com `stale: true` e o motivo em `warning`.
+ */
+export async function fetchUsage(now = Date.now(), { cacheFile = CACHE_FILE, request = requestUsage } = {}) {
+  let cached = null;
+  try { cached = JSON.parse(readFileSync(cacheFile, 'utf8')); } catch { /* sem cache ainda */ }
+  if (cached?.usage && now - cached.fetchedAt < CACHE_MAX_AGE_MS) return { usage: cached.usage, fetchedAt: cached.fetchedAt };
+  const fresh = await request(now);
+  if (fresh.usage) {
+    try { mkdirSync(dirname(cacheFile), { recursive: true }); writeFileSync(cacheFile, JSON.stringify({ fetchedAt: now, usage: fresh.usage })); } catch { /* segue sem cache */ }
+    return { usage: fresh.usage, fetchedAt: now };
+  }
+  if (cached?.usage && now - cached.fetchedAt < CACHE_STALE_LIMIT_MS) {
+    return { usage: cached.usage, fetchedAt: cached.fetchedAt, stale: true, warning: fresh.error };
+  }
+  return { error: `limites indisponíveis (${fresh.error})` };
+}
+
+/** " · dados de 14:05 (HTTP 429)" quando o valor mostrado é antigo; vazio quando é atual. */
+export function staleNote(result) {
+  if (!result?.stale) return '';
+  const at = new Date(result.fetchedAt);
+  return ` · dados de ${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')} (${result.warning})`;
 }
 
 const LABELS = {
