@@ -88,6 +88,16 @@ export class GitHub {
   }
 
   getIssue(n) { return this.json('GET', `/repos/${this.repo}/issues/${n}`); }
+
+  /** Issues que o PR fecha ("Closes #N"), com as etiquetas: [{ number, labels }]. */
+  async linkedIssues(prNumber) {
+    const [owner, name] = this.repo.split('/');
+    const query = `query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){
+      closingIssuesReferences(first:10){nodes{number labels(first:30){nodes{name}}}}}}}`;
+    const data = await this.json('POST', '/graphql', { body: { query, variables: { owner, name, n: prNumber } } });
+    const nodes = data?.data?.repository?.pullRequest?.closingIssuesReferences?.nodes ?? [];
+    return nodes.map((i) => ({ number: i.number, labels: i.labels.nodes.map((l) => l.name) }));
+  }
   addLabel(n, label) { return this.json('POST', `/repos/${this.repo}/issues/${n}/labels`, { body: { labels: [label] } }); }
   comment(n, body) { return this.json('POST', `/repos/${this.repo}/issues/${n}/comments`, { body: { body } }); }
 

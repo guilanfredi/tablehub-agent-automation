@@ -9,7 +9,8 @@ const result = (over = {}) => ({
   type: 'result', subtype: 'success', is_error: false, duration_ms: 125_000, duration_api_ms: 50_000, num_turns: 9,
   total_cost_usd: 0.5, result: 'PR #14 revisado sem bloqueantes.',
   usage: { input_tokens: 10, cache_creation_input_tokens: 1000, cache_read_input_tokens: 20_000, output_tokens: 500, output_tokens_details: { thinking_tokens: 200 } },
-  modelUsage: { 'claude-opus-5-5': {} }, permission_denials: [{}],
+  modelUsage: { 'claude-opus-5-5': { inputTokens: 10, cacheCreationInputTokens: 1000, cacheReadInputTokens: 20_000, outputTokens: 500, thinkingTokens: 200 } },
+  permission_denials: [{}],
   ...over,
 });
 
@@ -105,5 +106,53 @@ describe('relatório: totais e saída', () => {
     expect(md).toContain('[#10](https://github.com/guilanfredi/tablehub/issues/10)');
     expect(md).toContain('## Falhas');
     expect(toText({ ...args, runs: [], summary: summarize([]), usage: { error: 'login vencido' } })).toContain('login vencido');
+  });
+});
+
+describe('relatório: sessão com vários resultados, modelos e tarefas', () => {
+  it('usa os tokens da sessão inteira e não confia em turnos/duração do último resultado', () => {
+    const m = metricsFrom(result({ result_index: 3, num_turns: 1, duration_ms: 3000, usage: { cache_read_input_tokens: 140_000 } }));
+    expect(m).toMatchObject({ turns: null, durationMs: null, apiMs: null, costUsd: 0.5 });
+    expect(m.tokens.cacheRead).toBe(20_000); // modelUsage, não usage
+    const two = metricsFrom(result({ modelUsage: { 'claude-opus-5-5': { outputTokens: 10 }, 'claude-haiku-5-5': { outputTokens: 5 } } }));
+    expect(two.tokens.output).toBe(15);
+    expect(two.models).toEqual(['claude-opus-5-5', 'claude-haiku-5-5']);
+  });
+
+  it('dá nome curto ao modelo', async () => {
+    const { modelLabel } = await import('./collect.mjs');
+    expect(modelLabel({ models: ['claude-sonnet-5-5'] })).toBe('sonnet');
+    expect(modelLabel({ models: ['claude-opus-5-5', 'claude-haiku-5-5'] })).toBe('opus+haiku');
+    expect(modelLabel({ models: [], requestedModel: 'claude-sonnet-5-5' })).toBe('sonnet');
+    expect(modelLabel({ models: [] })).toBe('—');
+  });
+
+  it('junta issue e PR na mesma tarefa e diz se ela foi concluída', async () => {
+    const { linkTasks, taskStatus } = await import('./collect.mjs');
+    const items = new Map([
+      ['tablehub#21', { state: 'open', labels: ['pronto-para-aprovação'], isPr: true, linked: [20] }],
+      ['tablehub#20', { state: 'open', labels: [], isPr: false, linked: [] }],
+      ['tablehub#31', { state: 'open', labels: ['fase:qa'], isPr: true, linked: [26] }],
+    ]);
+    const base = { project: 'tablehub', outcome: 'ok', summary: '', ...metricsFrom(result()) };
+    const runs = linkTasks([
+      { ...base, role: 'analista', number: 20, task: 20 },
+      { ...base, role: 'dev', number: 21, task: 21 },
+      { ...base, role: 'qa', number: 21, task: 21 },
+      { ...base, role: 'dev', number: 31, task: 31 },
+    ], items);
+    expect(runs.map((r) => r.task)).toEqual([20, 20, 20, 26]);
+    const s = summarize(runs);
+    expect(Object.keys(s.byTask)).toEqual(['tablehub#20', 'tablehub#26']);
+    expect(s.byTask['tablehub#20']).toMatchObject({ runs: 3, items: [20, 21], roles: ['analista', 'dev', 'qa'] });
+    expect(taskStatus(s.byTask['tablehub#20'], items, 'pronto-para-aprovação')).toBe('concluída');
+    expect(taskStatus(s.byTask['tablehub#26'], items, 'pronto-para-aprovação')).toBe('em andamento');
+    expect(taskStatus(s.byTask['tablehub#26'], new Map(), 'pronto-para-aprovação')).toBeNull();
+    expect(Object.keys(s.byModel)).toEqual(['opus']);
+  });
+
+  it('resume a sequência de funções de uma tarefa', async () => {
+    const { rolesFlow } = await import('./render.mjs');
+    expect(rolesFlow(['analista', 'analista', 'dev', 'qa', 'dev', 'qa', 'revisor'])).toBe('analista×2 → dev → qa → dev → qa → revisor');
   });
 });

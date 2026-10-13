@@ -52,3 +52,27 @@ describe('limites da assinatura', () => {
     expect(formatMoney(2000, 'BRL').replace(/\s/g, ' ')).toBe('R$ 2.000,00');
   });
 });
+
+describe('limites: cache compartilhado', () => {
+  it('reaproveita valor recente, renova o vencido e cai para o último valor se a consulta falhar', async () => {
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { fetchUsage, staleNote } = await import('./usage.mjs');
+    const cacheFile = join(mkdtempSync(join(tmpdir(), 'usage-')), 'cache.json');
+    const usage = parseUsage(real);
+    let calls = 0;
+    const ok = async () => { calls++; return { usage }; };
+    const fail = async () => { calls++; return { error: 'HTTP 429, consultas demais' }; };
+    const t0 = new Date(2026, 9, 12, 14, 5).getTime();
+
+    expect(await fetchUsage(t0, { cacheFile, request: fail })).toEqual({ error: 'limites indisponíveis (HTTP 429, consultas demais)' });
+    expect(await fetchUsage(t0, { cacheFile, request: ok })).toEqual({ usage, fetchedAt: t0 });
+    expect(await fetchUsage(t0 + 60_000, { cacheFile, request: fail })).toEqual({ usage, fetchedAt: t0 }); // cache fresco: nem consulta
+    expect(calls).toBe(2);
+    const stale = await fetchUsage(t0 + 10 * 60_000, { cacheFile, request: fail });
+    expect(stale).toMatchObject({ usage, fetchedAt: t0, stale: true, warning: 'HTTP 429, consultas demais' });
+    expect(staleNote(stale)).toBe(' · dados de 14:05 (HTTP 429, consultas demais)');
+    expect(staleNote({ usage })).toBe('');
+  });
+});

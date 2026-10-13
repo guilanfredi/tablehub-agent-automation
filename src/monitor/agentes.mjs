@@ -8,7 +8,7 @@
  *   npm run agentes -- --json       saída em JSON (para scripts)
  */
 import { win32 } from 'node:path';
-import { fetchUsage, formatMoney, formatReset } from '../usage.mjs';
+import { fetchUsage, formatMoney, formatReset, staleNote } from '../usage.mjs';
 import { loadSessions, origin, sampleProcesses, untrackedProcesses } from './data.mjs';
 import { startDashboard } from './dashboard.mjs';
 
@@ -44,6 +44,7 @@ async function printOnce() {
     for (const l of usage.usage.limits) lines.push(`${l.label}: ${Math.round(l.percent)}% · renova ${formatReset(l.resetsAt, now)}`);
     const x = usage.usage.extra;
     if (x) lines.push(`Uso extra: ${formatMoney(x.used, x.currency)}${x.limit != null ? ` de ${formatMoney(x.limit, x.currency)}` : ''} no mês`);
+    if (usage.stale) lines.push(`(${staleNote(usage).slice(3)})`);
   } else {
     lines.push(`Limites da assinatura: ${usage.error}`);
   }
