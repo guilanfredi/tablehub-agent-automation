@@ -91,3 +91,16 @@ describe('monitor: faixa de limites compacta', () => {
     expect(strip(limitsLine({ usage }, now, 200))).toContain('█');
   });
 });
+
+describe('monitor: situação dos agentes na faixa de limites', () => {
+  it('mostra créditos ligados, a margem ou a pausa até o reset', async () => {
+    const { limitsLine } = await import('./dashboard.mjs');
+    const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const now = new Date(2026, 9, 12, 15, 0).getTime();
+    const usage = (p) => ({ limits: [{ id: 'session', label: 'Sessão (5 h)', percent: p, resetsAt: new Date(2026, 9, 12, 20, 0).toISOString(), severity: null }], extra: null });
+    expect(strip(limitsLine({ usage: usage(50) }, now, Infinity, { allowed: true, stopAtPercent: 90 }))).toContain('Agentes: créditos ligados');
+    expect(strip(limitsLine({ usage: usage(50) }, now, Infinity, { allowed: false, stopAtPercent: 90 }))).toContain('Agentes: param em 90%');
+    expect(strip(limitsLine({ usage: usage(93) }, now, Infinity, { allowed: false, stopAtPercent: 90 }))).toContain('Agentes pausados até hoje 20:00 (em 5h00)');
+    expect(strip(limitsLine({ usage: usage(93) }, now))).not.toContain('Agentes');
+  });
+});

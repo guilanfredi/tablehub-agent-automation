@@ -1,6 +1,10 @@
 {
   "maxTotal": 3,
   "pollSeconds": 15,
+  "extraUsage": {
+    "allowed": false,
+    "stopAtPercent": 90
+  },
   "projects": [
     "D:/dev/TableHub"
   ]

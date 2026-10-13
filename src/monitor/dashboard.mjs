@@ -9,6 +9,8 @@
  *   └───────────────┘└────────────────────────────────────────────┘
  */
 import { totalmem } from 'node:os';
+import { budgetGate } from '../dispatcher/budget.mjs';
+import { readExtraUsagePolicy } from '../dispatcher/config.mjs';
 import { fetchUsage, formatMoney, formatReset, level, staleNote } from '../usage.mjs';
 import { loadSessions, untrackedProcesses, origin, readTranscript, sampleProcesses, treeTotals } from './data.mjs';
 
@@ -145,9 +147,17 @@ function itemName(it, transcript) {
 // ---------------- estado do dashboard ----------------
 
 /** Faixa com os limites da assinatura: "Sessão (5 h) ███░ 15% renova hoje 20:00 (em 4h54) │ …" (testada). */
-export function limitsLine(result, now = Date.now(), width = Infinity) {
+export function limitsLine(result, now = Date.now(), width = Infinity, policy = null) {
   if (!result) return c.gray(' Limites da assinatura: consultando…');
   if (!result.usage) return c.gray(` Limites da assinatura: ${result.error}`);
+  // situação dos agentes do despachante frente à cota (créditos ligados/desligados)
+  let agents = '';
+  if (policy) {
+    const gate = budgetGate({ usage: result.usage, policy, now });
+    if (policy.allowed) agents = c.yellow('Agentes: créditos ligados');
+    else if (gate.allowed) agents = c.gray(`Agentes: param em ${policy.stopAtPercent}%`);
+    else agents = c.red(`Agentes pausados até ${gate.until ? formatReset(gate.until, now) : 'o reset'}`);
+  }
   const color = { alto: c.red, medio: c.yellow, baixo: c.green };
   const build = (compact) => {
     const parts = result.usage.limits.map((l) => {
@@ -159,6 +169,7 @@ export function limitsLine(result, now = Date.now(), width = Infinity) {
     });
     const x = result.usage.extra;
     if (x) parts.push(`${c.bold('Extra')} ${formatMoney(x.used, x.currency)}${x.limit != null ? c.gray(` / ${formatMoney(x.limit, x.currency)}`) : ''}`);
+    if (agents) parts.push(agents);
     return ` ${parts.join(c.gray(compact ? ' │ ' : '  │  '))}${c.gray(staleNote(result))}`;
   };
   // sem barras quando a linha completa não cabe no terminal
@@ -211,6 +222,7 @@ export function startDashboard() {
 
   async function refreshUsage() {
     ui.usage = await fetchUsage();
+    ui.policy = readExtraUsagePolicy().policy;
     render();
   }
 
@@ -336,7 +348,7 @@ export function startDashboard() {
       panel(metricW, bottomH, 'Métricas', metricLines(it, tr, metricW - 2, now), false),
     ];
     const keys = ` ${c.bold('↑↓')} sessão  ${c.bold('PgUp/PgDn')} rolar atividade  ${c.bold('End')} acompanhar  ${c.bold('t')} ${ui.showAll ? 'só ativas' : 'incluir encerradas'}  ${c.bold('q')} sair`;
-    const lines = [header, fit(limitsLine(ui.usage, now, cols), cols)];
+    const lines = [header, fit(limitsLine(ui.usage, now, cols, ui.policy), cols)];
     for (let i = 0; i < topH; i++) lines.push(top[0][i] + top[1][i]);
     for (let i = 0; i < bottomH; i++) lines.push(bottom[0][i] + bottom[1][i]);
     lines.push(fit(c.gray(keys), cols - 1));
