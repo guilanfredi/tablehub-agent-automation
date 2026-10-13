@@ -17,10 +17,12 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  LOG_DIR, MAX_RUNS_WITHOUT_PROGRESS, PROJECT_REFRESH_MIN, RETRY_COOLDOWN_MIN, STATE_DIR, loadMachineConfig,
+  LOG_DIR, MAX_RUNS_WITHOUT_PROGRESS, PROJECT_REFRESH_MIN, RETRY_COOLDOWN_MIN, STATE_DIR, loadMachineConfig, readExtraUsagePolicy,
 } from './config.mjs';
+import { fetchUsage, formatReset } from '../usage.mjs';
+import { budgetGate, exhaustedReset } from './budget.mjs';
 import { GitHub, findGh } from './github.mjs';
-import { findClaude, isAlive, killJobTree } from './proc.mjs';
+import { findClaude, freeLanePorts, isAlive, killJobTree } from './proc.mjs';
 import { autoPrompt, lanePorts, modelArgs, normalizeProjectConfig, rolePermissionsFile, runSettingsFor } from './project.mjs';
 import { classifyError, freeSlot, interleave, madeProgress, pickJobs, recordRun, waitingForParentRun } from './select.mjs';
 
@@ -261,6 +263,8 @@ async function startJob(p, role, item) {
     const claude = findClaude();
     if (!claude) throw new Error('Claude Code CLI não encontrado.');
     const ports = lanePorts(cfg, job.lane);
+    const stray = await freeLanePorts(Object.values(ports), cfg.worktreesDir);
+    if (stray) log(`${jobName(job)}: ${stray} servidor(es) de execuções anteriores liberados das portas da faixa ${job.lane}.`);
     await gh.addLabel(item.number, cfg.labels.working);
     job.labeled = true;
 
@@ -333,6 +337,11 @@ async function finalize(job) {
       const leftovers = await killJobTree(job.pid, job.startedAt);
       if (leftovers) log(`${name}: ${leftovers} processo(s) que sobraram encerrados (servidores, navegador).`);
     }
+    // a árvore pode ter se quebrado (shell intermediário já encerrado): limpa também pelas portas da faixa
+    if (p && job.lane) {
+      const stray = await freeLanePorts(Object.values(lanePorts(p.cfg, job.lane)), p.cfg.worktreesDir);
+      if (stray) log(`${name}: ${stray} servidor(es) que ficaram nas portas da faixa ${job.lane} encerrados.`);
+    }
     if (!p) { log(`AVISO: ${name}: projeto não carregado; etiquetas não atualizadas.`); return; }
     const { cfg, gh } = p;
     let outcome = 'ok';
@@ -348,8 +357,11 @@ async function finalize(job) {
         log(`ERRO: ${name}: ${text}`);
         const kind = classifyError(text);
         if (kind) {
-          writeFileSync(FILES.pause, new Date(Date.now() + kind.pauseMin * 60_000).toISOString());
-          log(`${kind.reason} Pausado por ${kind.pauseMin} min (execuções em andamento continuam).`);
+          // limite de uso: pausa até o reset informado pelo endpoint, quando ele souber; senão, pausa fixa
+          const reset = kind.limit ? exhaustedReset((await fetchUsage()).usage) : null;
+          const until = reset ?? new Date(Date.now() + kind.pauseMin * 60_000).toISOString();
+          writeFileSync(FILES.pause, until);
+          log(`${kind.reason} Pausado até ${formatReset(until)} (execuções em andamento continuam).`);
         }
       } else if (result) {
         log(`OK: ${name}: ${result.result}`);
@@ -390,6 +402,36 @@ let again = false;
 let forceNext = false;
 const lastErrors = new Map();
 let pauseLogged = 0;
+
+// ---------------- cota x créditos ----------------
+let lastPolicy = '';
+let budgetBlocked = '';
+
+const policyText = (p) => (p.allowed ? 'créditos LIGADOS para os agentes' : `créditos desligados para os agentes (param em ${p.stopAtPercent}% da sessão)`);
+
+/** A política e a cota permitem abrir agentes novos agora? Registra no log só as mudanças. */
+async function currentBudget() {
+  const { policy, error } = readExtraUsagePolicy();
+  if (error) logThrottled('extraUsage', `AVISO: política de créditos ilegível (${error}); usando o padrão: ${policyText(policy)}.`);
+  const usage = policy.allowed ? null : await fetchUsage();
+  return { policy, usage, gate: budgetGate({ usage: usage?.usage, policy }) };
+}
+
+async function budgetAllows() {
+  const { policy, gate } = await currentBudget();
+  const text = policyText(policy);
+  if (text !== lastPolicy) { if (lastPolicy) log(`Política alterada: ${text}.`); lastPolicy = text; }
+  if (gate.allowed) {
+    if (budgetBlocked) { log(`Cota disponível de novo (${gate.reason}); voltando a abrir agentes.`); budgetBlocked = ''; }
+    return true;
+  }
+  const key = `${gate.reason}|${gate.until}`;
+  if (key !== budgetBlocked) {
+    log(`Sem novos agentes: ${gate.reason}. Volta sozinho ${gate.until ? formatReset(gate.until) : 'quando a cota renovar'}; em andamento continuam. Para liberar créditos: npm run creditos -- on`);
+    budgetBlocked = key;
+  }
+  return false;
+}
 
 function logThrottled(key, msg) {
   // sem rede, GitHub fora etc.: registra uma vez a cada 10 min
@@ -436,7 +478,10 @@ async function tick(force = false) {
     for (const { p, items } of listed) {
       try { lists.push(await candidatesFor(p, items, free, running)); } catch (e) { logThrottled(`${p.cfg.id}:waiting`, `ERRO em ${p.cfg.id}: ${e.message}`); }
     }
-    for (const c of interleave(lists, free)) startJob(c.project, c.role, c.item);
+    const picks = interleave(lists, free);
+    // só consulta a cota quando há o que abrir (o cache de limites evita o HTTP 429)
+    if (picks.length && !(await budgetAllows())) return;
+    for (const c of picks) startJob(c.project, c.role, c.item);
   } finally {
     ticking = false;
     if (again) {
@@ -505,6 +550,8 @@ async function dryRun() {
   console.log(`${previous.length} execução(ões) em andamento; limite ${MAX}.`);
   const until = pausedUntil();
   if (until) console.log(`Pausado até ${new Date(until).toLocaleString('pt-BR')}.`);
+  const budget = await currentBudget();
+  console.log(`Política: ${policyText(budget.policy)}. Cota: ${budget.gate.allowed ? `pode abrir agentes (${budget.gate.reason})` : `sem novos agentes (${budget.gate.reason}) até ${budget.gate.until ? formatReset(budget.gate.until) : 'a cota renovar'}`}.`);
   const picks = interleave(lists, free);
   if (!picks.length) console.log('Nada a executar agora.');
   for (const c of picks) {

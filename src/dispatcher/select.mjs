@@ -129,6 +129,6 @@ export function freeSlot(used) {
 /** Classifica o erro de uma execução para decidir a pausa. */
 export function classifyError(text) {
   if (/authenticat|login|OAuth/i.test(text)) return { pauseMin: 60, reason: 'Login do Claude Code expirado: rode o CLI e faça /login.' };
-  if (/limit|quota|usage/i.test(text)) return { pauseMin: 30, reason: 'Limite de uso da assinatura atingido.' };
+  if (/limit|quota|usage/i.test(text)) return { pauseMin: 30, limit: true, reason: 'Limite de uso da assinatura atingido.' };
   return null;
 }

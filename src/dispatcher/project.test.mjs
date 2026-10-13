@@ -54,7 +54,7 @@ describe('configuração da máquina (config.local.json)', () => {
   it('aceita caminhos simples ou objetos e aplica padrões', () => {
     const c = normalizeMachineConfig({ projects: ['/dev/TableHub', { path: '/dev/outro', branch: 'trunk' }] });
     expect(c).toEqual({
-      maxTotal: 3, pollSeconds: 15,
+      maxTotal: 3, pollSeconds: 15, extraUsage: { allowed: false, stopAtPercent: 90 },
       projects: [{ path: resolve('/dev/TableHub'), branch: 'main' }, { path: resolve('/dev/outro'), branch: 'trunk' }],
     });
   });

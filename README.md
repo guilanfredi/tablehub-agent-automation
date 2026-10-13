@@ -32,6 +32,7 @@ Hoje atende o [TableHub](https://github.com/guilanfredi/tablehub), mas qualquer 
 | `projects` | — | Caminhos das cópias principais. Pode ser `"D:/dev/X"` ou `{ "path": "...", "branch": "main" }` |
 | `maxTotal` | 3 | Execuções em paralelo, somando todos os projetos |
 | `pollSeconds` | 15 | Intervalo da consulta ao GitHub (com ETag: "nada mudou" não gasta o limite da API) |
+| `extraUsage` | `{ "allowed": false, "stopAtPercent": 90 }` | Créditos (uso extra) para os agentes depois do limite; mude com `npm run creditos` (ver abaixo) |
 
 **De cada projeto** — `.agents/` no repositório do projeto, lido de `origin/<branch>`. Só vale o que já foi revisado e
 mergeado; a cópia de trabalho não importa. O despachante relê a cada 10 min.
@@ -72,10 +73,12 @@ mergeado; a cópia de trabalho não importa. O despachante relê a cada 10 min.
    PR no meio do trabalho, já com etiqueta de fase, e só no fim troca a etiqueta.
 3. Cada execução tem um worktree `<worktreesDir>/<função>-<n>` (limpo, na branch principal; `setup` quando o arquivo
    observado muda) e uma faixa de portas própria. As faixas são globais, então dois projetos nunca colidem.
-4. Marca a etiqueta `working`, roda a função com tempo máximo e, ao terminar, encerra processos que sobraram e
+4. Libera as portas da faixa (servidores de agentes que sobraram de execuções anteriores, com a cadeia que os recria),
+   marca a etiqueta `working`, roda a função com tempo máximo e, ao terminar, encerra processos que sobraram (pela árvore e pelas portas) e
    consulta de novo na hora. Se estourar o tempo, comenta e marca `waiting`.
 5. Execução que termina sem avançar a fase espera 10 min antes de tentar de novo. Depois de 3 seguidas, chama o dono.
-6. Login expirado pausa novos inícios por 1 h; limite de uso da assinatura, por 30 min.
+6. Antes de abrir agentes, confere a cota (veja "Créditos"). Login expirado pausa novos inícios por 1 h; agente que falha por limite de
+   uso pausa até o reset informado pelo endpoint (ou 30 min, se ele não souber).
 7. Se o despachante cair, volta a acompanhar as execuções em andamento e remove etiquetas `working` que ficaram sem execução.
 
 As variáveis `CLAUDE_AGENT_TASK` e `CLAUDE_AGENT_PROJECT` identificam a execução no monitor.
@@ -86,6 +89,7 @@ npm run despachante          # em primeiro plano, com o log no terminal (Ctrl+C 
 npm run despachante:teste    # o que seria executado agora (--only <função>, --max <n>)
 npm run agentes              # dashboard (--texto, --json, --todas para scripts)
 npm run relatorio            # relatório de hoje (--ontem, --data AAAA-MM-DD, --markdown, --json)
+npm run creditos             # créditos para os agentes: status, -- on, -- off, -- off --parar-em 95
 npm run agendador:instalar   # ou agendador:remover
 npm run monitor:instalar     # ou monitor:remover
 npm test
@@ -102,6 +106,19 @@ esses dados.
 - O token **nunca é renovado** aqui (isso derrubaria o login do Claude Code), não é gravado e só vai para `api.anthropic.com`.
   Login vencido → abra o Claude Code, que renova sozinho.
 - O semanal na faixa vermelha (≥ 90%) é o sinal para diminuir o `maxTotal`.
+
+## Créditos (uso extra) para os agentes
+Com o uso extra ligado na conta, o Claude Code não falha ao bater o limite: passa a cobrar créditos. O despachante decide
+por conta própria se os **agentes** podem fazer isso. O uso extra da conta continua valendo para as suas sessões interativas.
+
+- **Desligado (padrão):** com a sessão de 5 h em `stopAtPercent` (90%) ou o semanal em 100%, não abre agentes novos e
+  **volta sozinho no horário de reset** informado pelo endpoint. Agentes já em andamento terminam normalmente (podem
+  gastar um pouco de crédito se passarem do limite no meio).
+- **Ligado:** segue abrindo agentes depois do limite, cobrando créditos.
+- **Mudar a qualquer momento:** `npm run creditos -- on` / `npm run creditos -- off` / `npm run creditos -- off --parar-em 95`.
+  `npm run creditos` sozinho mostra a política, a cota e se os agentes estão pausados. O despachante relê a política a cada
+  consulta (≈15 s), sem reiniciar. O dashboard também mostra a situação ("Agentes pausados até 20:00").
+- Sem dados de limite (endpoint fora do ar e sem cache), o despachante não trava: segue abrindo agentes.
 
 ## Relatório
 `npm run relatorio` mostra as execuções de um dia (hoje, por padrão):
