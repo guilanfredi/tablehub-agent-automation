@@ -4,6 +4,7 @@
  */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { normalizeContexts } from './ci.mjs';
 import { normalizeItem } from './select.mjs';
 
 export function findGh() {
@@ -98,6 +99,24 @@ export class GitHub {
     const nodes = data?.data?.repository?.pullRequest?.closingIssuesReferences?.nodes ?? [];
     return nodes.map((i) => ({ number: i.number, labels: i.labels.nodes.map((l) => l.name) }));
   }
+  /** Checks do último commit de cada PR aberto, numa consulta só: Map número → { sha, contexts }. */
+  async prChecks() {
+    const [owner, name] = this.repo.split('/');
+    const query = `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){
+      pullRequests(states:OPEN,first:50,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number commits(last:1){nodes{commit{oid
+        statusCheckRollup{contexts(first:100){nodes{__typename
+          ... on CheckRun{name status conclusion startedAt}
+          ... on StatusContext{context state createdAt}}}}}}}}}}}`;
+    const data = await this.json('POST', '/graphql', { body: { query, variables: { owner, name } } });
+    if (data?.errors?.length) throw new Error(`GitHub GraphQL: ${data.errors[0].message}`);
+    const prs = new Map();
+    for (const pr of data?.data?.repository?.pullRequests?.nodes ?? []) {
+      const commit = pr.commits?.nodes?.[0]?.commit;
+      if (commit) prs.set(pr.number, { sha: commit.oid, contexts: normalizeContexts(commit.statusCheckRollup?.contexts?.nodes) });
+    }
+    return prs;
+  }
+
   addLabel(n, label) { return this.json('POST', `/repos/${this.repo}/issues/${n}/labels`, { body: { labels: [label] } }); }
   comment(n, body) { return this.json('POST', `/repos/${this.repo}/issues/${n}/comments`, { body: { body } }); }
 
