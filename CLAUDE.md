@@ -13,7 +13,7 @@ Despachante contínuo e monitor dos agentes do Claude Code. Visão geral, config
 
 ## Código
 - Node 20+, ES modules (`.mjs`), **sem dependências de produção** (só `vitest` para testes).
-- `src/dispatcher/`: `index.mjs` (processo contínuo), `select.mjs` (regras puras de escolha), `project.mjs`
+- `src/dispatcher/`: `index.mjs` (processo contínuo), `select.mjs` (regras puras de escolha), `ci.mjs` (espera do CI, pura), `project.mjs`
   (`.agents/config.json`), `config.mjs` (`config.local.json`), `github.mjs` (API com ETag), `proc.mjs` (processos no Windows).
 - `src/monitor/`: `hook.mjs` (copiado para `~/.claude/monitor/` pelo `install.mjs`; não pode importar nada do repositório),
   `data.mjs`, `dashboard.mjs` (ANSI puro) e `agentes.mjs`.

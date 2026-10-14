@@ -33,6 +33,17 @@ describe('configuração do projeto (.agents/config.json)', () => {
     expect(() => normalizeProjectConfig({ ...base, bot: { login: 'x' } }, where)).toThrow(/"bot"/);
   });
 
+  it('lê a espera do CI, com padrões, e valida as funções citadas', () => {
+    expect(normalizeProjectConfig(base, where).ci).toBeNull();
+    const ci = { checks: ['test', 'e2e'], roles: ['dev'] };
+    expect(normalizeProjectConfig({ ...base, ci }, where).ci).toEqual({ checks: ['test', 'e2e'], roles: ['dev'], failLabel: null, missingAfterMin: 20 });
+    expect(normalizeProjectConfig({ ...base, ci: { ...ci, failLabel: 'fase:dev', missingAfterMin: 5 } }, where).ci)
+      .toMatchObject({ failLabel: 'fase:dev', missingAfterMin: 5 });
+    expect(() => normalizeProjectConfig({ ...base, ci: { ...ci, roles: ['qa'] } }, where)).toThrow(/ci.roles/);
+    expect(() => normalizeProjectConfig({ ...base, ci: { ...ci, checks: [] } }, where)).toThrow(/ci.checks/);
+    expect(() => normalizeProjectConfig({ ...base, ci: { ...ci, missingAfterMin: 0 } }, where)).toThrow(/missingAfterMin/);
+  });
+
   it('calcula as portas da faixa somando o número da faixa à base', () => {
     const p = normalizeProjectConfig(base, where);
     expect(lanePorts(p, 2)).toEqual({ TABLEHUB_WEB_PORT: 5202, TABLEHUB_WORKER_PORT: 8802 });

@@ -1,7 +1,7 @@
 /**
  * Configuração de um projeto atendido: .agents/ na branch principal do repositório do projeto.
  *
- *   .agents/config.json      repositório, dono, bot, etiquetas, funções (modelo, esforço), portas, preparação do worktree
+ *   .agents/config.json      repositório, dono, bot, etiquetas, funções (modelo, esforço), espera do CI, portas, preparação do worktree
  *   .agents/roles/<f>.json   permissões do Claude Code para cada função (passadas com --settings)
  *   .agents/prompt.md        instruções extras do projeto para o modo automático (opcional)
  *
@@ -36,6 +36,15 @@ export function normalizeProjectConfig(raw, { path, branch }) {
     need(r?.overrides === undefined || (Array.isArray(r.overrides) && r.overrides.every((o) => Array.isArray(o?.labels) && o.labels.length)),
       `função ${r?.name}: "overrides" precisa ser uma lista e cada item precisa de "labels".`);
   }
+  if (c.ci !== undefined) {
+    const names = (c.roles ?? []).map((r) => r?.name);
+    need(Array.isArray(c.ci?.checks) && c.ci.checks.length > 0 && c.ci.checks.every((x) => typeof x === 'string' && x),
+      '"ci.checks" precisa listar os nomes dos checks exigidos (ex.: ["test", "e2e"]).');
+    need(Array.isArray(c.ci?.roles) && c.ci.roles.length > 0 && c.ci.roles.every((x) => names.includes(x)),
+      '"ci.roles" precisa listar funções de "roles" (as que esperam o CI).');
+    need(c.ci?.failLabel === undefined || typeof c.ci.failLabel === 'string', '"ci.failLabel" precisa ser texto.');
+    need(c.ci?.missingAfterMin === undefined || c.ci.missingAfterMin > 0, '"ci.missingAfterMin" precisa ser maior que 0.');
+  }
   for (const [name, base] of Object.entries(c.ports ?? {})) {
     need(/^[A-Z][A-Z0-9_]*$/.test(name) && Number.isInteger(base) && base > 1024 && base < 65000,
       `porta ${name}: nome de variável em maiúsculas e base numérica entre 1024 e 65000.`);
@@ -55,6 +64,7 @@ export function normalizeProjectConfig(raw, { path, branch }) {
       overrides: (r.overrides ?? []).map((o) => ({ labels: o.labels, model: o.model ?? null, effort: o.effort ?? null })),
     })),
     maxPerRole: c.maxPerRole ?? {},
+    ci: c.ci ? { checks: c.ci.checks, roles: c.ci.roles, failLabel: c.ci.failLabel ?? null, missingAfterMin: c.ci.missingAfterMin ?? 20 } : null,
     ports: c.ports ?? {},
     setup: c.setup ?? null,
     path,

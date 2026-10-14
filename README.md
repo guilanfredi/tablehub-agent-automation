@@ -51,6 +51,7 @@ mergeado; a cópia de trabalho não importa. O despachante relê a cada 10 min.
       "overrides": [{ "labels": ["tipo:bug"], "model": "claude-sonnet-5-5" }] }   // exceção por etiqueta
   ],
   "maxPerRole": { "revisor": 1 },           // opcional
+  "ci": { "checks": ["test", "e2e"], "roles": ["qa", "revisor"], "failLabel": "fase:dev" },   // opcional
   "worktreesDir": "../TableHub-agents",     // relativo ao projeto
   "addDirs": ["manuals"],                   // pastas extras liberadas para leitura (--add-dir)
   "setup": { "command": "npm ci --no-audit --no-fund", "whenChanged": "package-lock.json" },
@@ -64,13 +65,21 @@ mergeado; a cópia de trabalho não importa. O despachante relê a cada 10 min.
   do Claude Code. `overrides` troca modelo/esforço quando o item tem uma das etiquetas. Num PR, contam também as etiquetas
   das issues que ele fecha (`Closes #N`). O `npm run despachante:teste` mostra como cada função rodaria.
 - `labels.done`: etiqueta de tarefa concluída (opcional); o relatório usa para o custo por tarefa concluída.
+- **Espera do CI** (`ci`, opcional): as funções de `ci.roles` só pegam um PR depois que os checks de `ci.checks` terminaram
+  no último commit. Assim o agente anterior entrega sem ficar parado em `gh pr checks --watch`, e o seguinte não começa sobre
+  um PR quebrado. Com algum check vermelho, o despachante troca a etiqueta da fase por `ci.failLabel` e comenta (uma vez
+  por commit; sem `failLabel`, o PR só fica parado). Os nomes são os dos jobs do Actions; `"e2e"` vale também para a matriz
+  (`e2e (1, 2)`…). Os demais checks (ex.: sincronização do quadro) não contam. Check exigido que não aparece em
+  `ci.missingAfterMin` (padrão 20) minutos depois de o despachante ver o commit é ignorado, para não travar a tarefa. CI
+  instável: reexecute o job no GitHub; o despachante segue quando ele ficar verde.
 
 ## Como funciona
 1. A cada consulta, junta as tarefas de todos os projetos. Em cada projeto, vale a ordem das funções e, dentro da mesma
    fase, vai primeiro o item parado há mais tempo. As vagas são divididas entre os projetos, um de cada por vez.
 2. Ignora tarefas com a etiqueta `working`, as que não foram criadas pelo dono ou pelo bot (repositórios públicos), e as com
    `waiting` até o dono comentar. Um PR do bot que fecha uma issue ainda em execução espera ela terminar: o agente abre o
-   PR no meio do trabalho, já com etiqueta de fase, e só no fim troca a etiqueta.
+   PR no meio do trabalho, já com etiqueta de fase, e só no fim troca a etiqueta. Com `ci`, PRs das funções de `ci.roles`
+   esperam o CI (e voltam para `ci.failLabel` se ele falhar), mesmo sem vagas livres.
 3. Cada execução tem um worktree `<worktreesDir>/<função>-<n>` (limpo, na branch principal; `setup` quando o arquivo
    observado muda) e uma faixa de portas própria. As faixas são globais, então dois projetos nunca colidem.
 4. Libera as portas da faixa (servidores de agentes que sobraram de execuções anteriores, com a cadeia que os recria),

@@ -25,6 +25,7 @@ import { GitHub, findGh } from './github.mjs';
 import { findClaude, freeLanePorts, isAlive, killJobTree } from './proc.mjs';
 import { autoPrompt, lanePorts, modelArgs, normalizeProjectConfig, rolePermissionsFile, runSettingsFor } from './project.mjs';
 import { classifyError, freeSlot, interleave, madeProgress, pickJobs, recordRun, waitingForParentRun } from './select.mjs';
+import { ciGate, describeCi, gatedRole } from './ci.mjs';
 
 // ---------------- argumentos e configuração ----------------
 const argv = process.argv.slice(2);
@@ -146,6 +147,7 @@ async function refreshProjects() {
         cfg, extraPrompt,
         gh: prev?.cfg.repo === cfg.repo ? prev.gh : new GitHub(cfg.repo),
         waitingCache: prev?.waitingCache ?? new Map(),
+        ci: prev?.ci ?? { at: 0, prs: null, firstSeen: new Map(), reported: new Map(), returned: new Set() },
       });
       if (projectErrors.has(entry.path)) { log(`Projeto ${cfg.id} carregado de novo.`); projectErrors.delete(entry.path); }
     } catch (e) {
@@ -441,13 +443,55 @@ function logThrottled(key, msg) {
   lastErrors.set(key, { msg, at: Date.now() });
 }
 
-/** Candidatos de cada projeto, já filtrados pelas regras e pelo histórico. */
-async function candidatesFor(p, items, freeSlots, runningJobs) {
+/**
+ * Espera do CI (`ci` no .agents/config.json): consulta os checks dos PRs abertos quando algum PR espera o CI,
+ * no máximo a cada CI_REFRESH_MS (ou já, com `force`). Uma consulta que falha deixa esses PRs esperando.
+ */
+const CI_REFRESH_MS = 30_000;
+async function ciGateFor(p, items, { force = false } = {}) {
+  const { cfg, ci } = p;
+  if (!cfg.ci || !items.some((it) => gatedRole(it, cfg))) return { blocked: new Set(), failures: [], states: [] };
+  if (force || !ci.prs || Date.now() - ci.at >= CI_REFRESH_MS) {
+    ci.at = Date.now();
+    try {
+      ci.prs = await p.gh.prChecks();
+      lastErrors.delete(`${cfg.id}:ci`);
+    } catch (e) {
+      ci.prs = null;
+      logThrottled(`${cfg.id}:ci`, `ERRO ao consultar o CI de ${cfg.id}: ${e.message}`);
+    }
+    for (const pr of ci.prs?.values() ?? []) if (!ci.firstSeen.has(pr.sha)) ci.firstSeen.set(pr.sha, Date.now());
+  }
+  return ciGate({ items, prs: ci.prs, cfg, firstSeen: ci.firstSeen, now: Date.now() });
+}
+
+/** Registra as mudanças de estado do CI e devolve para a correção os PRs com o CI vermelho (uma vez por commit). */
+async function applyCiGate(p, gate) {
+  const { cfg, gh, ci } = p;
+  for (const s of gate.states) {
+    const text = `${cfg.id} #${s.item.number} (${s.role.name}): ${describeCi(s)}`;
+    const key = `${s.item.number}:${s.role.name}`;
+    if (ci.reported.get(key) !== text) { log(text); ci.reported.set(key, text); }
+  }
+  for (const f of gate.failures) {
+    const n = f.item.number;
+    // a lista pode ainda vir do cache com a etiqueta antiga; e, se o dono devolver a fase sem novo commit, não insiste
+    if (ci.returned.has(`${n}@${f.sha}`)) continue;
+    ci.returned.add(`${n}@${f.sha}`);
+    log(`${cfg.id} #${n}: voltando de '${f.role.label}' para '${cfg.ci.failLabel}' (CI vermelho em ${f.sha.slice(0, 7)}).`);
+    await safe('etiqueta do CI', () => gh.removeLabel(n, f.role.label));
+    await safe('etiqueta do CI', () => gh.addLabel(n, cfg.ci.failLabel));
+    await safe('comentar CI', () => gh.comment(n, `**[Automação]** O CI falhou em ${f.sha.slice(0, 7)} (${f.failed.join(', ')}). O PR voltou para \`${cfg.ci.failLabel}\` antes da função ${f.role.name}.`));
+  }
+}
+
+/** Candidatos de cada projeto, já filtrados pelas regras, pelo histórico e pelo CI. */
+async function candidatesFor(p, items, freeSlots, runningJobs, ciBlocked = new Set()) {
   const mine = runningJobs.filter((j) => j.project === p.cfg.id);
   return pickJobs({
     items, running: mine, roles: rolesOf(p.cfg), maxTotal: mine.length + freeSlots, maxPerRole: p.cfg.maxPerRole,
     history: history[p.cfg.id] ?? {}, now: Date.now(), cfg: labelCfg(p.cfg), waitingResolved: await resolveWaiting(p, items),
-    blocked: waitingForParentRun(items, mine, p.cfg.bot.login),
+    blocked: new Set([...waitingForParentRun(items, mine, p.cfg.bot.login), ...ciBlocked]),
   }).map((c) => ({ ...c, project: p }));
 }
 
@@ -472,11 +516,21 @@ async function tick(force = false) {
       if (pauseLogged !== until) { log(`Pausado até ${new Date(until).toLocaleString('pt-BR')}.`); pauseLogged = until; }
       return;
     }
+    // o CI vermelho volta para a correção mesmo sem vagas livres
+    const gates = new Map();
+    for (const { p, items } of listed) {
+      try {
+        const gate = await ciGateFor(p, items, { force });
+        await applyCiGate(p, gate);
+        gates.set(p, gate);
+      } catch (e) { logThrottled(`${p.cfg.id}:ci-gate`, `ERRO no CI de ${p.cfg.id}: ${e.message}`); }
+    }
     const free = MAX - running.length;
     if (free <= 0) return;
     const lists = [];
     for (const { p, items } of listed) {
-      try { lists.push(await candidatesFor(p, items, free, running)); } catch (e) { logThrottled(`${p.cfg.id}:waiting`, `ERRO em ${p.cfg.id}: ${e.message}`); }
+      if (!gates.has(p)) continue; // sem saber o CI, não abre agentes nesse projeto
+      try { lists.push(await candidatesFor(p, items, free, running, gates.get(p).blocked)); } catch (e) { logThrottled(`${p.cfg.id}:waiting`, `ERRO em ${p.cfg.id}: ${e.message}`); }
     }
     const picks = interleave(lists, free);
     // só consulta a cota quando há o que abrir (o cache de limites evita o HTTP 429)
@@ -545,7 +599,11 @@ async function dryRun() {
   for (const p of projects.values()) {
     const { items } = await p.gh.listOpen();
     console.log(`${p.cfg.id} (${p.cfg.repo}): ${items.length} itens abertos; funções: ${p.cfg.roles.map((r) => r.name).join(', ')}.`);
-    lists.push(await candidatesFor(p, items, free, previous));
+    if (p.cfg.ci) console.log(`  CI: ${p.cfg.ci.roles.join(', ')} esperam ${p.cfg.ci.checks.join(', ')}${p.cfg.ci.failLabel ? `; falha volta para '${p.cfg.ci.failLabel}'` : ''}.`);
+    const gate = await ciGateFor(p, items, { force: true });
+    for (const s of gate.states) console.log(`  #${s.item.number} (${s.role.name}): ${describeCi(s)}`);
+    for (const f of gate.failures) console.log(`  Voltaria para '${p.cfg.ci.failLabel}': #${f.item.number}`);
+    lists.push(await candidatesFor(p, items, free, previous, gate.blocked));
   }
   console.log(`${previous.length} execução(ões) em andamento; limite ${MAX}.`);
   const until = pausedUntil();
