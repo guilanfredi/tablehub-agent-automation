@@ -28,22 +28,42 @@ powershell -ExecutionPolicy Bypass -File scripts\paperclip.ps1
 O script põe o Git Bash no PATH só desse processo (o Paperclip usa `sh` para criar os worktrees), fixa a versão
 (`$Version`), desliga a telemetria e faz `git fetch` dos projetos a cada 5 min (os worktrees partem do `origin/main`).
 
-**Configurar ou recriar o time:** `node paperclip/setup.mjs` (`--dry-run` para conferir). É idempotente. Ele liga os
+**Configurar ou recriar a empresa:** `node paperclip/setup.mjs` (`--dry-run` para conferir). É idempotente. Ele liga os
 workspaces isolados (recurso experimental, sem o qual os agentes trabalhariam na cópia principal), cria ou atualiza os
-agentes e as instruções (`paperclip/comum.md` + `paperclip/funcoes.json`) e o projeto TableHub.
+agentes, a hierarquia e as instruções (`paperclip/comum.md` + `paperclip/funcoes.json`), o projeto TableHub e as rotinas.
 
-| Agente | Modelo | Esforço | Portas (faixa) | Papel |
+| Agente | Modelo | Esforço | Faixa | Papel |
 |---|---|---|---|---|
+| **Produtor** | Opus 5.5 | médio | 6 | direção: transforma metas em tarefas, distribui e acompanha; todos respondem a ele |
 | Analista | Opus 5.5 | padrão | 5 | especifica jogo novo / melhoria grande e passa ao Dev |
 | Dev | Opus 5.5 | padrão | 1 | implementa jogos e melhorias especificadas |
 | Dev Rápido | Sonnet 5.5 | padrão | 2 | bugs e melhorias simples |
-| QA | Sonnet 5.5 | médio | 3 | 1ª etapa de revisão (testa o PR) |
-| Revisor | Opus 5.5 | médio | 4 | 2ª etapa; aprova e marca o PR `pronto-para-aprovação` |
+| QA | Sonnet 5.5 | médio | 3 | etapa de revisão: testa o PR |
+| **Designer** | Sonnet 5.5 | padrão | 7 | UI/UX, sistema visual e arte SVG; etapa de revisão de mudanças de interface |
+| **Segurança** | Opus 5.5 | médio | 8 | auditoria mensal; etapa de revisão de mudanças no servidor/protocolo |
+| Revisor | Opus 5.5 | médio | 4 | última etapa; aprova e marca o PR `pronto-para-aprovação` |
+| **Release** | Sonnet 5.5 | médio | 9 | confere produção depois dos deploys, notas de versão |
+| **Financeiro** | Sonnet 5.5 | baixo | 10 | custos, consumo da assinatura e orçamento (só recomenda) |
+| **Marketing** | Sonnet 5.5 | padrão | 11 | marketing, redes sociais, comunidade e crescimento (o dono publica) |
 
-**Fluxo:** crie a tarefa no Paperclip e atribua (jogo novo/melhoria grande → Analista; bug/melhoria simples → Dev Rápido).
-O agente trabalha no worktree da issue, abre o PR no GitHub pela conta bot e manda a issue para `in_review`; ela passa pelo
-QA e pelo Revisor (quem pede mudanças devolve a issue para quem implementou). No fim, o PR fica `pronto-para-aprovação`
-no GitHub, e o merge continua sendo seu. Dúvidas dos agentes aparecem como perguntas na issue do Paperclip.
+Os papéis novos foram adaptados de duas empresas-modelo do catálogo [paperclipai/companies](https://github.com/paperclipai/companies)
+(Donchitos Game Studio e Agency Agents), importadas como "Referência - …" no Paperclip, com **todos os agentes pausados**.
+
+**Rotinas** (fuso de São Paulo; pausar ou mudar o horário pela interface do Paperclip):
+
+| Rotina | Agente | Quando | Roda só se houve atividade? |
+|---|---|---|---|
+| Auditoria de segurança mensal | Segurança | dia 1, 09:00 | não |
+| Relatório financeiro semanal | Financeiro | segunda, 09:00 | não |
+| Plano de conteúdo semanal | Marketing | segunda, 10:00 | não |
+| Verificação de produção | Release | todo dia, 08:00 | sim |
+| Status semanal da empresa | Produtor | sexta, 17:00 | sim |
+
+**Fluxo:** dê uma meta ou tarefa ao Produtor, ou atribua direto (jogo novo/melhoria grande → Analista; bug/melhoria simples →
+Dev Rápido). O agente trabalha no worktree da issue, abre o PR no GitHub pela conta bot e manda a issue para `in_review`;
+ela passa pelas etapas (QA, Designer se for interface, Segurança se for servidor, Revisor). Quem pede mudanças devolve a issue
+para quem implementou. No fim, o PR fica `pronto-para-aprovação` no GitHub, e o merge continua sendo seu. Dúvidas dos agentes
+aparecem como perguntas na issue do Paperclip. Nada é publicado fora do GitHub sem você (posts do Marketing são rascunhos).
 
 **Pontos de atenção:**
 - Agentes rodam **liberados** (`dangerouslySkipPermissions`, padrão do Paperclip): as permissões por função de `.agents/roles`
