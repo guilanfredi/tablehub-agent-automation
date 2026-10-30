@@ -21,12 +21,22 @@ O Paperclip roda localmente (servidor Node + Postgres embutido + interface web e
 agentes como uma empresa: tarefas são **issues do Paperclip**, cada uma com um responsável e um **worktree isolado** do
 repositório; as passagens entre funções usam **etapas de revisão** nativas.
 
+**Instalar** (uma vez, e a cada troca de `$Version`). O instalador gerenciado (`paperclipai install`) falha no Windows
+com `spawn npm ENOENT`; use o npm global. Os scripts de instalação que o npm bloqueia não fazem falta: o do Postgres
+embutido não faz nada no Windows.
+```powershell
+npm install -g paperclipai@2026.1023.0
+```
+
 **Iniciar** (no Windows ele não roda como serviço: funciona enquanto a janela estiver aberta):
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\paperclip.ps1
 ```
-O script põe o Git Bash no PATH só desse processo (o Paperclip usa `sh` para criar os worktrees), fixa a versão
-(`$Version`), desliga a telemetria e faz `git fetch` dos projetos a cada 5 min (os worktrees partem do `origin/main`).
+O script põe o Git Bash no PATH só desse processo (o Paperclip usa `sh` para criar os worktrees), usa o `paperclipai`
+instalado se for a versão fixada (`$Version`; senão avisa e roda via `npx`), desliga a telemetria e faz `git fetch` dos
+projetos a cada 5 min (os worktrees partem do `origin/main`).
+Versão nova com migrações do banco: o servidor pergunta antes de aplicar. Faça um backup de
+`~/.paperclip/instances/default` com o servidor parado e responda `y`.
 
 **Configurar ou recriar a empresa:** `node paperclip/setup.mjs` (`--dry-run` para conferir). É idempotente. Ele liga os
 workspaces isolados (recurso experimental, sem o qual os agentes trabalhariam na cópia principal), cria ou atualiza os
