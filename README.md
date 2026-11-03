@@ -1,17 +1,90 @@
 # tablehub-agent-automation
 
-Automação local do time de agentes do Claude Code, separada dos projetos que ela atende:
+Automação local do time de agentes do Claude Code, separada dos projetos que ela atende.
 
-- **Despachante** (`src/dispatcher/`): fica rodando e consulta o GitHub dos projetos a cada 15 s. Quando uma issue/PR
-  espera uma função (etiqueta de fase), roda `claude -p "/<função> <n>"` num worktree dedicado, com até 3 execuções
-  em paralelo e portas próprias para cada uma. Parado, não gasta cota da assinatura.
+> **Desde 23/10/2026 o time roda no [Paperclip](https://github.com/paperclipai/paperclip)**, que substituiu o despachante
+> (veja a seção "Paperclip" logo abaixo). O despachante continua no repositório, desativado, caso seja preciso voltar.
+> Monitor e relatório seguem valendo.
+
+- **Paperclip** (`scripts/paperclip.ps1`, `paperclip/`): inicialização no Windows e configuração do time (agentes,
+  modelos, instruções, projeto com worktree isolado por issue).
+- **Despachante** (`src/dispatcher/`, **desativado**): consultava o GitHub a cada 15 s e, quando uma issue/PR esperava uma
+  função (etiqueta de fase), rodava `claude -p "/<função> <n>"` num worktree dedicado.
 - **Monitor** (`src/monitor/`): dashboard de terminal, no estilo `pm2 monit`, com todas as sessões do Claude Code da
   máquina (app desktop, terminal e despachante), alimentado por hooks, e o consumo dos limites da assinatura.
 - **Relatório** (`src/report/`): execuções dos agentes num dia, com tokens, tempo, turnos, custo equivalente e falhas.
 
 Hoje atende o [TableHub](https://github.com/guilanfredi/tablehub), mas qualquer projeto com um `.agents/config.json` pode ser incluído.
 
-## Instalação (Windows)
+## Paperclip
+O Paperclip roda localmente (servidor Node + Postgres embutido + interface web em http://127.0.0.1:3100) e organiza os
+agentes como uma empresa: tarefas são **issues do Paperclip**, cada uma com um responsável e um **worktree isolado** do
+repositório; as passagens entre funções usam **etapas de revisão** nativas.
+
+**Instalar** (uma vez, e a cada troca de `$Version`). O instalador gerenciado (`paperclipai install`) falha no Windows
+com `spawn npm ENOENT`; use o npm global. Os scripts de instalação que o npm bloqueia não fazem falta: o do Postgres
+embutido não faz nada no Windows.
+```powershell
+npm install -g paperclipai@2026.1023.0
+```
+
+**Iniciar** (no Windows ele não roda como serviço: funciona enquanto a janela estiver aberta):
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\paperclip.ps1
+```
+O script põe o Git Bash no PATH só desse processo (o Paperclip usa `sh` para criar os worktrees), usa o `paperclipai`
+instalado se for a versão fixada (`$Version`; senão avisa e roda via `npx`), desliga a telemetria e faz `git fetch` dos
+projetos a cada 5 min (os worktrees partem do `origin/main`).
+Versão nova com migrações do banco: o servidor pergunta antes de aplicar. Faça um backup de
+`~/.paperclip/instances/default` com o servidor parado e responda `y`.
+
+**Configurar ou recriar a empresa:** `node paperclip/setup.mjs` (`--dry-run` para conferir). É idempotente. Ele liga os
+workspaces isolados (recurso experimental, sem o qual os agentes trabalhariam na cópia principal), cria ou atualiza os
+agentes, a hierarquia e as instruções (`paperclip/comum.md` + `paperclip/funcoes.json`), o projeto TableHub e as rotinas.
+
+| Agente | Modelo | Esforço | Faixa | Papel |
+|---|---|---|---|---|
+| **Produtor** | Opus 5.5 | médio | 6 | direção: transforma metas em tarefas, distribui e acompanha; todos respondem a ele |
+| Analista | Opus 5.5 | padrão | 5 | especifica jogo novo / melhoria grande e passa ao Dev |
+| Dev | Opus 5.5 | padrão | 1 | implementa jogos e melhorias especificadas |
+| Dev Rápido | Sonnet 5.5 | padrão | 2 | bugs e melhorias simples |
+| QA | Sonnet 5.5 | médio | 3 | etapa de revisão: testa o PR |
+| **Designer** | Sonnet 5.5 | padrão | 7 | UI/UX, sistema visual e arte SVG; etapa de revisão de mudanças de interface |
+| **Segurança** | Opus 5.5 | médio | 8 | auditoria mensal; etapa de revisão de mudanças no servidor/protocolo |
+| Revisor | Opus 5.5 | médio | 4 | última etapa; aprova e marca o PR `pronto-para-aprovação` |
+| **Release** | Sonnet 5.5 | médio | 9 | confere produção depois dos deploys, notas de versão |
+| **Financeiro** | Sonnet 5.5 | baixo | 10 | custos, consumo da assinatura e orçamento (só recomenda) |
+| **Marketing** | Sonnet 5.5 | padrão | 11 | marketing, redes sociais, comunidade e crescimento (o dono publica) |
+
+Os papéis novos foram adaptados de duas empresas-modelo do catálogo [paperclipai/companies](https://github.com/paperclipai/companies)
+(Donchitos Game Studio e Agency Agents), importadas como "Referência - …" no Paperclip, com **todos os agentes pausados**.
+
+**Rotinas** (fuso de São Paulo; pausar ou mudar o horário pela interface do Paperclip):
+
+| Rotina | Agente | Quando | Roda só se houve atividade? |
+|---|---|---|---|
+| Auditoria de segurança mensal | Segurança | dia 1, 09:00 | não |
+| Relatório financeiro semanal | Financeiro | segunda, 09:00 | não |
+| Plano de conteúdo semanal | Marketing | segunda, 10:00 | não |
+| Verificação de produção | Release | todo dia, 08:00 | sim |
+| Status semanal da empresa | Produtor | sexta, 17:00 | sim |
+
+**Fluxo:** dê uma meta ou tarefa ao Produtor, ou atribua direto (jogo novo/melhoria grande → Analista; bug/melhoria simples →
+Dev Rápido). O agente trabalha no worktree da issue, abre o PR no GitHub pela conta bot e manda a issue para `in_review`;
+ela passa pelas etapas (QA, Designer se for interface, Segurança se for servidor, Revisor). Quem pede mudanças devolve a issue
+para quem implementou. No fim, o PR fica `pronto-para-aprovação` no GitHub, e o merge continua sendo seu. Dúvidas dos agentes
+aparecem como perguntas na issue do Paperclip. Nada é publicado fora do GitHub sem você (posts do Marketing são rascunhos).
+
+**Pontos de atenção:**
+- Agentes rodam **liberados** (`dangerouslySkipPermissions`, padrão do Paperclip): as permissões por função de `.agents/roles`
+  não se aplicam mais. As regras (sem merge, sem push na `main`) ficam só nas instruções.
+- O Paperclip **não conhece os limites da assinatura** (sessão de 5 h, semanal): a política de créditos do despachante não
+  vale mais. Com o uso extra ligado na conta, agentes seguem cobrando depois do limite; use orçamento por agente no
+  Paperclip ou desligue o uso extra no claude.ai.
+- `GH_CONFIG_DIR` vai no ambiente de cada agente: no Windows o Paperclip procuraria a configuração do `gh` no lugar errado.
+- Uma execução por vez por agente (as portas são fixas por agente).
+
+## Instalação do despachante (desativado)
 1. **Node 20+**, **GitHub CLI** com a conta bot ativa (`gh auth status`) e **login do Claude Code CLI**. O CLI embutido no
    app desktop tem login próprio; para fazer o login, no PowerShell:
    ```powershell
@@ -94,7 +167,7 @@ As variáveis `CLAUDE_AGENT_TASK` e `CLAUDE_AGENT_PROJECT` identificam a execuç
 
 ## Comandos
 ```bash
-npm run despachante          # em primeiro plano, com o log no terminal (Ctrl+C para parar)
+npm run despachante          # (desativado) em primeiro plano, com o log no terminal (Ctrl+C para parar)
 npm run despachante:teste    # o que seria executado agora (--only <função>, --max <n>)
 npm run agentes              # dashboard (--texto, --json, --todas para scripts)
 npm run relatorio            # relatório de hoje (--ontem, --data AAAA-MM-DD, --markdown, --json)
