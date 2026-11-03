@@ -14,6 +14,8 @@
     partir do origin/main da cópia principal e não faz fetch sozinho.
   No Windows o Paperclip não roda como serviço: ele funciona enquanto esta janela estiver aberta.
 #>
+param([switch]$AbrirNavegador) # abre http://127.0.0.1:3100 quando o servidor responder (usado pelo atalho)
+
 $Version = '2026.1023.0'
 $Repos = @('D:\dev\TableHub')
 
@@ -31,6 +33,15 @@ $fetchJob = Start-Job -ArgumentList (, $Repos) -ScriptBlock {
   }
 }
 
+$browserJob = $null
+if ($AbrirNavegador) {
+  $browserJob = Start-Job -ScriptBlock {
+    for ($i = 0; $i -lt 120; $i++) {
+      try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://127.0.0.1:3100/api/companies' | Out-Null; Start-Process 'http://127.0.0.1:3100'; return } catch { Start-Sleep -Seconds 2 }
+    }
+  }
+}
+
 $installed = $null
 if (Get-Command paperclipai -ErrorAction SilentlyContinue) { $installed = (paperclipai --version 2>$null | Select-Object -Last 1) }
 
@@ -43,6 +54,8 @@ try {
     npx --yes "paperclipai@$Version" run
   }
 } finally {
-  Stop-Job $fetchJob -ErrorAction SilentlyContinue
-  Remove-Job $fetchJob -Force -ErrorAction SilentlyContinue
+  foreach ($j in @($fetchJob, $browserJob) | Where-Object { $_ }) {
+    Stop-Job $j -ErrorAction SilentlyContinue
+    Remove-Job $j -Force -ErrorAction SilentlyContinue
+  }
 }
